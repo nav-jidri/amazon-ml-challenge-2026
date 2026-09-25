@@ -42,10 +42,10 @@ P3 constructs 27 pairwise features using the normalized representations provided
 
 ## 3. Class Imbalance Handling
 
-- In candidate generation, negative candidate pairs vastly outnumber true positive matches (typically ~91.5% negatives to ~8.5% positives).
+- In candidate generation, negative candidate pairs outnumber true positive matches (in the retrieved candidate pool with official ground truth: ~75.7% negatives to ~24.3% positives).
 - **Strategy:** `scale_pos_weight` is dynamically calculated solely from the **training split**:
   $$\text{scale\_pos\_weight} = \frac{N_{\text{neg\_train}}}{N_{\text{pos\_train}}}$$
-  (Computed as $10.81$ on the training split).
+  (Computed dynamically as $3.14$ on the training split of 229,867 pairs).
 - This ensures the loss function appropriately weights positive pairs without introducing synthetic bias.
 
 ---

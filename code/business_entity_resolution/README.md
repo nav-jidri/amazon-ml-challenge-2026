@@ -80,18 +80,26 @@ amazon-ml-challenge-2026/
 - **Country & Source Context:** Country match, missing country indicator, Source 2 indicator, Source 3 indicator, joint name-address Jaccard, empty value indicators.
 
 ### Training & Validation Diagnostics
-- **Training Pair Extraction:** 181,192 labeled candidate pairs generated from 15,000 S1 training entities.
-- **Class Balance:** 15,476 positives (8.54%), 165,716 negatives (91.46%).
-- **Leakage Prevention:** Grouped split by `source1_entity_id` via `GroupShuffleSplit` (Train: 146,222 pairs across 10,051 entities; Val: 34,970 pairs across 2,513 entities).
-- **Class Weight:** `scale_pos_weight = 10.81` calculated dynamically from the training split.
+- **Training Pair Extraction:** 285,915 candidate pairs labeled using official `train_ground_truth.tsv` (covering 2,083,574 S1 entities and 10,320,219 S2/S3 indexed records).
+- **Class Balance:** 69,478 true positive matches (24.30%), 216,437 negative candidate pairs (75.70%).
+- **Leakage Prevention:** Grouped split strictly by `source1_entity_id` via `GroupShuffleSplit` (Train: 229,867 pairs across 15,472 S1 entities; Val: 56,048 pairs across 3,869 S1 entities).
+- **Class Weight:** `scale_pos_weight = 3.14` calculated dynamically from the training split.
 - **Model:** `XGBClassifier` (`n_estimators=300, max_depth=4, lr=0.05, objective='binary:logistic'`).
-- **Validation Metric:** $F_{0.5} = 1.0000$ across validation pairs.
-- **Key Features by Importance:**
-  1. `name_addr_joint_jaccard` (0.5889)
-  2. `addr_token_containment_min` (0.1393)
-  3. `addr_token_jaccard` (0.1123)
-  4. `name_token_sort_ratio` (0.0481)
-  5. `addr_char_3gram_jaccard` (0.0384)
+- **Validation Results:**
+  - Logloss on validation set converged to `0.01867`.
+  - At threshold $\tau = 0.50$: Precision = 0.9868, Recall = 0.9872, $F_{0.5} = 0.9869$.
+  - **Optimal Validation $F_{0.5}$:** **0.9932** at decision threshold $\tau = 0.85$ (Precision = 0.9968, Recall = 0.9793).
+- **Top Features by Importance:**
+  1. `addr_token_containment_max` (0.4931)
+  2. `addr_token_jaccard` (0.2190)
+  3. `addr_empty_either` (0.1071)
+  4. `addr_char_3gram_jaccard` (0.0868)
+  5. `addr_len_ratio` (0.0261)
+  6. `name_token_jaccard` (0.0106)
+  7. `name_token_sort_ratio` (0.0076)
+  8. `name_token_containment_min` (0.0056)
+  9. `name_len_diff` (0.0054)
+  10. `addr_token_containment_min` (0.0053)
 
 ---
 

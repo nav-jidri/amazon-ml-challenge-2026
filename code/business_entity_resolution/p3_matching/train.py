@@ -36,14 +36,32 @@ def extract_training_pairs(
 ) -> Tuple[List[Tuple[str, str, int]], Dict[str, Dict[str, Any]], Dict[str, Dict[str, Any]]]:
     """Generate labeled candidate pairs (s1_id, candidate_id, label) from training data.
 
-    Positive pairs are true matching business entities across sources.
-    Negative pairs are hard negatives retrieved via blocking passes that do not match.
+    Ground truth labels are loaded directly from train_ground_truth.tsv.
+    Positive pairs are confirmed true matches from ground truth.
+    Negative pairs are non-matching candidates retrieved via blocking passes.
     """
     s1_path = train_dir / "train_source1.tsv"
     s2_path = train_dir / "train_source2.tsv"
     s3_path = train_dir / "train_source3.tsv"
+    gt_path = train_dir / "train_ground_truth.tsv"
 
     print(f"Loading training records from {train_dir}...")
+
+    # Load ground truth
+    ground_truth: Dict[str, Set[str]] = {}
+    if gt_path.exists():
+        print(f"  Loading official ground truth from {gt_path.name}...")
+        with open(gt_path, "r", encoding="utf-8") as f:
+            next(f, None)  # skip header
+            for line in f:
+                parts = line.strip().split("\t")
+                if len(parts) >= 2 and parts[1].strip():
+                    s1 = parts[0].strip()
+                    mids = {m.strip() for m in parts[1].split(",") if m.strip()}
+                    ground_truth[s1] = mids
+        print(f"  Loaded ground truth for {len(ground_truth):,} Source 1 entities.")
+    else:
+        print(f"  Warning: {gt_path} not found. Ensure train_ground_truth.tsv is placed in train_dir.")
     
     # Store preprocessed record metadata
     records_s1: Dict[str, Dict[str, Any]] = {}
@@ -89,51 +107,55 @@ def extract_training_pairs(
     labeled_pairs: List[Tuple[str, str, int]] = []
 
     for chunk in iter_preprocessed_file(s1_path, chunksize=chunksize):
-        for _, row in chunk.iterrows():
-            s1_id = str(row.get("entity_id", "")).strip()
+        for eid, nclean, ncomp, ntk, aclean, atk, cclean in zip(
+            chunk["entity_id"],
+            chunk["name_clean"],
+            chunk["name_compact"],
+            chunk["name_token_key"],
+            chunk["address_clean"],
+            chunk["address_token_key"],
+            chunk["country_clean"]
+        ):
+            s1_id = str(eid).strip()
             if not s1_id:
                 continue
 
             records_s1[s1_id] = {
-                "name_clean": row.get("name_clean", ""),
-                "name_compact": row.get("name_compact", ""),
-                "name_token_key": row.get("name_token_key", ""),
-                "address_clean": row.get("address_clean", ""),
-                "address_token_key": row.get("address_token_key", ""),
-                "country_clean": row.get("country_clean", ""),
+                "name_clean": nclean,
+                "name_compact": ncomp,
+                "name_token_key": ntk,
+                "address_clean": aclean,
+                "address_token_key": atk,
+                "country_clean": cclean,
             }
 
-            candidates = indexes.retrieve_candidates_for_row(row)
+            # Candidate retrieval via blocking
+            row_dict = {
+                "name_token_key": ntk,
+                "name_compact": ncomp,
+                "address_token_key": atk
+            }
+            candidates = set()
+            if ntk:
+                candidates.update(indexes.retrieve_by_name_token(ntk))
+            if ncomp:
+                candidates.update(indexes.retrieve_by_name_compact(ncomp))
+            if atk:
+                candidates.update(indexes.retrieve_by_address_token(atk))
             candidates.discard(s1_id)
 
-            rec_a = records_s1[s1_id]
-            toks_name_a = set(str(rec_a["name_clean"]).split())
-            toks_addr_a = set(str(rec_a["address_clean"]).split())
+            true_matches = ground_truth.get(s1_id, set())
 
+            # Add all candidate pairs with ground truth labels
             for cand_id in candidates:
-                rec_b = records_s23.get(cand_id)
-                if not rec_b:
-                    continue
+                if cand_id in records_s23:
+                    is_match = 1 if cand_id in true_matches else 0
+                    labeled_pairs.append((s1_id, cand_id, is_match))
 
-                # Determine label: matching entity criteria
-                toks_name_b = set(str(rec_b["name_clean"]).split())
-                toks_addr_b = set(str(rec_b["address_clean"]).split())
-
-                name_overlap = len(toks_name_a & toks_name_b) / max(1, len(toks_name_a | toks_name_b))
-                addr_overlap = len(toks_addr_a & toks_addr_b) / max(1, len(toks_addr_a | toks_addr_b))
-                country_same = (rec_a["country_clean"] == rec_b["country_clean"]) and (rec_a["country_clean"] != "")
-
-                is_match = 0
-                # True positive match conditions:
-                if country_same:
-                    if (rec_a["name_compact"] == rec_b["name_compact"] and rec_a["name_compact"] != "") and (addr_overlap >= 0.3 or rec_a["address_clean"] == rec_b["address_clean"]):
-                        is_match = 1
-                    elif name_overlap >= 0.6 and addr_overlap >= 0.35:
-                        is_match = 1
-                    elif rec_a["name_token_key"] == rec_b["name_token_key"] and (addr_overlap >= 0.25 or rec_a["address_token_key"] == rec_b["address_token_key"]):
-                        is_match = 1
-
-                labeled_pairs.append((s1_id, cand_id, is_match))
+            # Also ensure any true match for this S1 entity is present in training data
+            for match_id in true_matches:
+                if match_id in records_s23 and match_id not in candidates:
+                    labeled_pairs.append((s1_id, match_id, 1))
 
             s1_count += 1
             if s1_count >= max_s1_records:
