@@ -12,9 +12,13 @@
 ---
 
 ## 2. Methodology
-
 ### 2.1 Problem Analysis
-*Key insights discovered during EDA — noise patterns, address variations, missing fields, etc.*
+
+The datasets contain noisy business entity information across multiple sources. The same business can appear with differences in capitalization, punctuation, word order, abbreviations, legal suffixes, spelling variations, multilingual text, and address formatting.
+
+Data inspection also showed missing business names and addresses in some source records. The test data additionally contains France records, while the training data contains US and India records, so country handling was kept general rather than hard-coded to a fixed set of countries.
+
+The preprocessing stage was designed to preserve the original data while creating normalized representations for downstream candidate generation and matching.
 
 ### 2.2 Solution Strategy
 *Outline your high-level approach.*
