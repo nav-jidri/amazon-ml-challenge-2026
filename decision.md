@@ -112,3 +112,25 @@
 ---
 
 *All decisions above are captured chronologically and reflect only meaningful architectural or implementation choices.*
+
+
+---
+
+# Version 1 Baseline Status & Version 2 Improvements
+
+## Baseline Status: Unvalidated (Missing Upstream Artifacts)
+**Date:** 2026-09-25
+**Context:** P4 codebase (evaluation, thresholding, TSV generation) is fully implemented and passes all synthetic unit tests. However, an end-to-end baseline evaluation on real data cannot be established because the `output/` directory is empty.
+**Validation Status:** Not validated. `utils/validate_submission.py` cannot be run until `output/matching_results.tsv` and `output/candidate_pairs.tsv` are generated.
+**Missing Dependencies:**
+1. **P2 Train/Test Outputs:** `output/candidate_pairs.tsv` (test) and `output/train_candidate_pairs.tsv` (train) do not exist. P2 must be executed.
+2. **P3 Train/Test Outputs:** `output/candidate_pairs_scored.tsv` (test) and `output/train_candidate_pairs_scored.tsv` (train) do not exist.
+3. **P3 Valid Model:** The current XGBoost model (`artifacts/xgb_matching_model.json`) was trained on heuristic pseudo-labels rather than `train_ground_truth.tsv`.
+
+## Proposed Improvements for Version 2
+**Date:** 2026-09-25
+**Context:** Based on static analysis of the P1–P4 pipeline, several structural bottlenecks exist that will cap performance once the pipeline is run.
+**Identified Opportunities:**
+1. **Fix P3 Training Labels (Critical):** P3 must load `train_ground_truth.tsv` during training. Without this, the model merely memorizes P1/P2 string similarities, making P4 threshold tuning impossible to optimize against the true F0.5 metric.
+2. **Improve P2 Candidate Recall:** P2 currently uses strict exact-match blocking (`name_token_key`, `name_compact`, `address_token_key`). Entities with typos, abbreviations, or missing addresses will not become candidates (P2 FN). V2 should incorporate fuzzy blocking (e.g., phonetic keys or TF-IDF) to ensure true matches reach the P3 scorer.
+3. **P4 Threshold Selection Strategy:** Once P3 is retrained, P4 must run its `--sweep` function on a cleanly held-out validation split of the training data (not the exact data P3 trained on) to establish the production threshold.
