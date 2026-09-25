@@ -1,6 +1,16 @@
-/amazon-ml-challenge-2026/output/*.tsv
+# Challenge dataset
 /amazon-ml-challenge-2026/dataset/
+
+# Generated outputs
+/amazon-ml-challenge-2026/output/*.tsv
+
+# Python
 __pycache__/
 *.pyc
+
+# Virtual environment
 .venv/
 venv/
+
+# Jupyter
+.ipynb_checkpoints/
