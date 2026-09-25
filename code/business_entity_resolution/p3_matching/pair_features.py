@@ -1,0 +1,233 @@
+# -*- coding: utf-8 -*-
+"""pair_features.py
+
+Pairwise feature engineering for candidate pairs using P1 normalized representations.
+Extracts name, address, country, token overlap, character n-gram, and source-level features.
+"""
+
+from __future__ import annotations
+import math
+import re
+from typing import List, Dict, Any, Tuple, Optional
+import numpy as np
+import pandas as pd
+
+
+FEATURE_NAMES = [
+    # --- Name Features ---
+    "name_exact_clean",              # Exact equality of name_clean
+    "name_exact_compact",            # Exact equality of name_compact
+    "name_token_jaccard",            # Jaccard similarity of name token sets
+    "name_token_overlap_count",      # Count of shared name tokens
+    "name_token_containment_min",    # min(|A cap B| / |A|, |A cap B| / |B|)
+    "name_token_containment_max",    # max(|A cap B| / |A|, |A cap B| / |B|)
+    "name_token_sort_ratio",         # Character-level similarity on name_token_key
+    "name_char_2gram_jaccard",       # Character 2-gram Jaccard on name_clean
+    "name_char_3gram_jaccard",       # Character 3-gram Jaccard on name_clean
+    "name_len_diff",                 # Absolute difference in clean name length
+    "name_len_ratio",                # min(len_a, len_b) / max(len_a, len_b)
+
+    # --- Address Features ---
+    "addr_exact_clean",              # Exact equality of address_clean
+    "addr_token_jaccard",            # Jaccard similarity of address token sets
+    "addr_token_overlap_count",      # Count of shared address tokens
+    "addr_num_overlap_count",        # Count of shared numeric tokens (house/PIN/zip)
+    "addr_token_containment_min",    # min(|A cap B| / |A|, |A cap B| / |B|)
+    "addr_token_containment_max",    # max(|A cap B| / |A|, |A cap B| / |B|)
+    "addr_char_3gram_jaccard",       # Character 3-gram Jaccard on address_clean
+    "addr_len_diff",                 # Absolute difference in clean address length
+    "addr_len_ratio",                # min(len_a, len_b) / max(len_a, len_b)
+
+    # --- Country Features ---
+    "country_match",                 # Exact match on country_clean
+    "country_missing_either",        # 1 if either record country is empty
+
+    # --- Interaction & Meta Features ---
+    "source_is_s2",                  # 1 if candidate is from S2
+    "source_is_s3",                  # 1 if candidate is from S3
+    "name_addr_joint_jaccard",       # name_token_jaccard * addr_token_jaccard
+    "name_empty_either",             # 1 if either record name is missing/empty
+    "addr_empty_either",             # 1 if either record address is missing/empty
+]
+
+
+def _safe_str(val: Any) -> str:
+    """Safely convert value to non-null string."""
+    if val is None or pd.isna(val):
+        return ""
+    return str(val).strip()
+
+
+def _get_char_ngrams(s: str, n: int) -> set:
+    """Return set of character n-grams."""
+    if len(s) < n:
+        return {s} if s else set()
+    return {s[i:i + n] for i in range(len(s) - n + 1)}
+
+
+def _jaccard_similarity(set_a: set, set_b: set) -> float:
+    """Calculate Jaccard similarity between two sets."""
+    if not set_a or not set_b:
+        return 0.0
+    union_len = len(set_a | set_b)
+    if union_len == 0:
+        return 0.0
+    return len(set_a & set_b) / union_len
+
+
+def _containment(set_a: set, set_b: set) -> Tuple[float, float]:
+    """Calculate min and max containment between two sets."""
+    if not set_a or not set_b:
+        return 0.0, 0.0
+    intersection_len = len(set_a & set_b)
+    c_a = intersection_len / len(set_a)
+    c_b = intersection_len / len(set_b)
+    return min(c_a, c_b), max(c_a, c_b)
+
+
+def _char_similarity(s1: str, s2: str) -> float:
+    """Fast character-level dice similarity."""
+    if not s1 or not s2:
+        return 1.0 if (not s1 and not s2) else 0.0
+    if s1 == s2:
+        return 1.0
+    ng1 = _get_char_ngrams(s1, 2)
+    ng2 = _get_char_ngrams(s2, 2)
+    return _jaccard_similarity(ng1, ng2)
+
+
+def compute_pair_feature_vector(
+    rec_a: Dict[str, Any],
+    rec_b: Dict[str, Any],
+    b_entity_id: str = ""
+) -> List[float]:
+    """Compute pairwise feature vector for two preprocessed records.
+
+    Parameters
+    ----------
+    rec_a : dict
+        P1 preprocessed fields for record A (Source 1)
+    rec_b : dict
+        P1 preprocessed fields for record B (Source 2 or 3)
+    b_entity_id : str
+        Identifier for record B (to determine S2 vs S3 indicator)
+    """
+    # Names
+    name_a = _safe_str(rec_a.get("name_clean", ""))
+    name_b = _safe_str(rec_b.get("name_clean", ""))
+    compact_a = _safe_str(rec_a.get("name_compact", ""))
+    compact_b = _safe_str(rec_b.get("name_compact", ""))
+    tkey_a = _safe_str(rec_a.get("name_token_key", ""))
+    tkey_b = _safe_str(rec_b.get("name_token_key", ""))
+
+    tokens_a = set(name_a.split())
+    tokens_b = set(name_b.split())
+
+    name_exact_clean = 1.0 if (name_a and name_a == name_b) else 0.0
+    name_exact_compact = 1.0 if (compact_a and compact_a == compact_b) else 0.0
+    name_token_jaccard = _jaccard_similarity(tokens_a, tokens_b)
+    name_token_overlap_count = float(len(tokens_a & tokens_b))
+    name_cont_min, name_cont_max = _containment(tokens_a, tokens_b)
+    name_token_sort_ratio = _char_similarity(tkey_a, tkey_b)
+
+    name_ng2_a = _get_char_ngrams(name_a, 2)
+    name_ng2_b = _get_char_ngrams(name_b, 2)
+    name_char_2gram_jaccard = _jaccard_similarity(name_ng2_a, name_ng2_b)
+
+    name_ng3_a = _get_char_ngrams(name_a, 3)
+    name_ng3_b = _get_char_ngrams(name_b, 3)
+    name_char_3gram_jaccard = _jaccard_similarity(name_ng3_a, name_ng3_b)
+
+    len_na, len_nb = len(name_a), len(name_b)
+    name_len_diff = float(abs(len_na - len_nb))
+    name_len_ratio = (min(len_na, len_nb) / max(len_na, len_nb)) if max(len_na, len_nb) > 0 else 1.0
+
+    # Address
+    addr_a = _safe_str(rec_a.get("address_clean", ""))
+    addr_b = _safe_str(rec_b.get("address_clean", ""))
+    addr_toks_a = set(addr_a.split())
+    addr_toks_b = set(addr_b.split())
+
+    addr_exact_clean = 1.0 if (addr_a and addr_a == addr_b) else 0.0
+    addr_token_jaccard = _jaccard_similarity(addr_toks_a, addr_toks_b)
+    addr_token_overlap_count = float(len(addr_toks_a & addr_toks_b))
+
+    nums_a = {t for t in addr_toks_a if re.match(r"^\d+$", t)}
+    nums_b = {t for t in addr_toks_b if re.match(r"^\d+$", t)}
+    addr_num_overlap_count = float(len(nums_a & nums_b))
+
+    addr_cont_min, addr_cont_max = _containment(addr_toks_a, addr_toks_b)
+
+    addr_ng3_a = _get_char_ngrams(addr_a, 3)
+    addr_ng3_b = _get_char_ngrams(addr_b, 3)
+    addr_char_3gram_jaccard = _jaccard_similarity(addr_ng3_a, addr_ng3_b)
+
+    len_aa, len_ab = len(addr_a), len(addr_b)
+    addr_len_diff = float(abs(len_aa - len_ab))
+    addr_len_ratio = (min(len_aa, len_ab) / max(len_aa, len_ab)) if max(len_aa, len_ab) > 0 else 1.0
+
+    # Country
+    c_a = _safe_str(rec_a.get("country_clean", ""))
+    c_b = _safe_str(rec_b.get("country_clean", ""))
+    country_match = 1.0 if (c_a and c_b and c_a == c_b) else 0.0
+    country_missing_either = 1.0 if (not c_a or not c_b) else 0.0
+
+    # Interaction & Source meta
+    b_id = b_entity_id or _safe_str(rec_b.get("entity_id", ""))
+    source_is_s2 = 1.0 if b_id.startswith("S2-") else 0.0
+    source_is_s3 = 1.0 if b_id.startswith("S3-") else 0.0
+    name_addr_joint_jaccard = name_token_jaccard * addr_token_jaccard
+    name_empty_either = 1.0 if (not name_a or not name_b) else 0.0
+    addr_empty_either = 1.0 if (not addr_a or not addr_b) else 0.0
+
+    return [
+        name_exact_clean,
+        name_exact_compact,
+        name_token_jaccard,
+        name_token_overlap_count,
+        name_cont_min,
+        name_cont_max,
+        name_token_sort_ratio,
+        name_char_2gram_jaccard,
+        name_char_3gram_jaccard,
+        name_len_diff,
+        name_len_ratio,
+        addr_exact_clean,
+        addr_token_jaccard,
+        addr_token_overlap_count,
+        addr_num_overlap_count,
+        addr_cont_min,
+        addr_cont_max,
+        addr_char_3gram_jaccard,
+        addr_len_diff,
+        addr_len_ratio,
+        country_match,
+        country_missing_either,
+        source_is_s2,
+        source_is_s3,
+        name_addr_joint_jaccard,
+        name_empty_either,
+        addr_empty_either,
+    ]
+
+
+def build_feature_matrix(
+    pair_rows: List[Tuple[str, str]],
+    records_s1: Dict[str, Dict[str, Any]],
+    records_s23: Dict[str, Dict[str, Any]]
+) -> np.ndarray:
+    """Generate feature matrix (N x M) for a batch of candidate pairs (s1_id, candidate_id)."""
+    rows = []
+    dummy_rec = {
+        "name_clean": "", "name_compact": "", "name_token_key": "",
+        "address_clean": "", "address_token_key": "", "country_clean": ""
+    }
+    for s1_id, cand_id in pair_rows:
+        rec_a = records_s1.get(s1_id, dummy_rec)
+        rec_b = records_s23.get(cand_id, dummy_rec)
+        feat = compute_pair_feature_vector(rec_a, rec_b, b_entity_id=cand_id)
+        rows.append(feat)
+
+    if not rows:
+        return np.empty((0, len(FEATURE_NAMES)), dtype=np.float32)
+    return np.asarray(rows, dtype=np.float32)

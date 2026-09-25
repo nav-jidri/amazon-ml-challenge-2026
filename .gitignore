@@ -1,7 +1,9 @@
 dataset/
-*.tsv
-*.zip
+ml_dataset/
+output/
+.venv/
 __pycache__/
 *.pyc
+*.tsv
+*.zip
 .env
-output/

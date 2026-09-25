@@ -1,7 +1,14 @@
 import re
+import sys
 import unicodedata
 import pandas as pd
 from pathlib import Path
+
+if hasattr(sys.stdout, "reconfigure"):
+    try:
+        sys.stdout.reconfigure(encoding="utf-8")
+    except Exception:
+        pass
 
 
 # ============================================================
@@ -10,8 +17,19 @@ from pathlib import Path
 
 BASE_DIR = Path(__file__).resolve().parents[2]
 
-TRAIN_DIR = BASE_DIR / "dataset" / "train"
-TEST_DIR = BASE_DIR / "dataset" / "test"
+if (BASE_DIR / "dataset" / "train").exists():
+    TRAIN_DIR = BASE_DIR / "dataset" / "train"
+    TEST_DIR = BASE_DIR / "dataset" / "test"
+elif (BASE_DIR.parent / "ml_dataset" / "data" / "train").exists():
+    TRAIN_DIR = BASE_DIR.parent / "ml_dataset" / "data" / "train"
+    TEST_DIR = BASE_DIR.parent / "ml_dataset" / "data" / "test"
+elif (BASE_DIR / "ml_dataset" / "data" / "train").exists():
+    TRAIN_DIR = BASE_DIR / "ml_dataset" / "data" / "train"
+    TEST_DIR = BASE_DIR / "ml_dataset" / "data" / "test"
+else:
+    TRAIN_DIR = BASE_DIR / "dataset" / "train"
+    TEST_DIR = BASE_DIR / "dataset" / "test"
+
 
 
 # ============================================================
