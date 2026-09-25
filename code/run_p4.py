@@ -126,11 +126,24 @@ def main() -> int:
             threshold = 0.50
             print(f"Warning: No threshold or ground truth provided. Using default threshold {threshold}.")
 
+    # Resolve test directory and source1 path dynamically if default path doesn't exist
+    test_dir_path = Path(args.test_dir)
+    if not test_dir_path.exists():
+        for alt in [Path("ml_dataset/data/test"), Path("ml_dataset/test")]:
+            if alt.exists():
+                test_dir_path = alt
+                break
+
+    test_source1_path = Path(args.test_source1)
+    if not test_source1_path.exists():
+        if (test_dir_path / "test_source1.tsv").exists():
+            test_source1_path = test_dir_path / "test_source1.tsv"
+
     print(f"Selecting matches using threshold {threshold}...")
     matches = select_matches(scored_pairs, threshold)
 
-    print(f"Loading all S1 entity IDs from {args.test_source1}...")
-    s1_ids = load_s1_entity_ids(Path(args.test_source1))
+    print(f"Loading all S1 entity IDs from {test_source1_path}...")
+    s1_ids = load_s1_entity_ids(test_source1_path)
 
     output_path = Path(args.output)
     print(f"Writing matching results to {output_path}...")
@@ -141,13 +154,13 @@ def main() -> int:
             print("Error: --candidate-pairs is required for --validate")
             return 1
         print("Running validator...")
-        success = run_validator(
-            matching_results_path=output_path,
-            test_source1_path=Path(args.test_source1),
-            candidate_pairs_path=Path(args.candidate_pairs),
-            test_dir=Path(args.test_dir)
+        exit_code, val_output = run_validator(
+            matching_path=output_path,
+            candidate_path=Path(args.candidate_pairs),
+            test_dir=test_dir_path
         )
-        if not success:
+        print(val_output)
+        if exit_code != 0:
             print("Validation failed!")
             return 1
         print("Validation successful!")
