@@ -127,13 +127,33 @@ def normalize_text(value) -> str:
 # ============================================================
 
 # Legal suffixes are represented as tuples so that multi-token
-# suffixes can be removed safely from the END of a name.
+# Indic word replacements for multilingual business names
+INDIC_WORD_REPLACEMENTS = {
+    "एसएस": "ss", "प्राइवेट": "private", "लिमिटेड": "limited", "कंपनी": "company",
+    "एंटरप्राइजेज": "enterprises", "वेंचर्स": "ventures", "सर्विसेज": "services",
+    "इंडस्ट्रीज": "industries", "फूड": "food", "होटल": "hotel",
+    "टेक्नोलॉजी": "technology", "सॉल्यूशंस": "solutions", "एसोसिएशन": "association",
+    "बैंक": "bank", "ट्रस्ट": "trust", "कॉर्पोरेशन": "corporation",
+    "इन्वेस्टमेंट्स": "investments", "ट्रेडर्स": "traders", "इंटरनेशनल": "international",
+    "ग्रुप": "group", "हरियाणा": "haryana", "ಕರ್ನಾಟಕ": "karnataka", "ತಮಿಳುನಾಡು": "tamil nadu",
+    "ಮಹಾರಾಷ್ಟ್ರ": "maharashtra", "ದೆಹಲಿ": "delhi", "ರಾಜಸ್ಥಾನ": "rajasthan",
+    "తెలంగాణ": "telangana", "ఆంధ్రప్రదేశ్": "andhra pradesh", "ఒడిశా": "odisha",
+    "ଶକ୍ତି": "shakti", "ଆଗ୍ରୋ": "agro", "ଲିମିଟେଡ୍": "limited",
+    "గ్రేట్": "great", "ఇంపెక్స్": "impex", "ప్రైవేట్": "private", "లిమిటెడ్": "limited",
+    "రెడ్": "red", "వెంచర్స్": "ventures", "हॉस्पिटल": "hospital", "मल्टीस्पेशलिटी": "multispeciality",
+    "ऑटोमोबाइल्स": "automobiles", "टेक्सटाइल्स": "textiles", "फार्मा": "pharma",
+    "हेल्थकेयर": "healthcare", "एजुकेशन": "education", "सिक्योरिटीज": "securities",
+}
+
+HONORIFIC_PREFIXES = {"the", "smt", "m/s", "mr", "mrs", "ms", "shri", "dr", "pllc", "llc", "inc", "ltd", "partners"}
 
 LEGAL_SUFFIX_TUPLES = [
     # 3-token suffixes
     ("limited", "liability", "company"),
     ("l", "l", "c"),
     ("l", "l", "p"),
+    ("private", "limited", "company"),
+    ("pvt", "ltd", "co"),
 
     # 2-token suffixes
     ("private", "limited"),
@@ -141,6 +161,8 @@ LEGAL_SUFFIX_TUPLES = [
     ("pvt", "ltd"),
     ("pty", "ltd"),
     ("co", "ltd"),
+    ("gmbh", "co", "kg"),
+    ("sp", "z", "o", "o"),
 
     # 1-token suffixes
     ("incorporated",),
@@ -151,15 +173,25 @@ LEGAL_SUFFIX_TUPLES = [
     ("sarl",),
     ("corp",),
     ("llc",),
+    ("pllc",),
     ("inc",),
+    ("lnc",),
     ("ltd",),
     ("plc",),
     ("llp",),
     ("sas",),
+    ("sasu",),
     ("sa",),
     ("lp",),
     ("co",),
     ("pvt",),
+    ("pc",),
+    ("pa",),
+    ("federation",),
+    ("foundation",),
+    ("center",),
+    ("centre",),
+    ("services",),
 ]
 
 ALL_LEGAL_SUFFIX_TOKENS = {
@@ -170,35 +202,34 @@ ALL_LEGAL_SUFFIX_TOKENS = {
 
 
 def normalize_business_name(value) -> str:
-    """Normalize a business name using the generic text normalizer."""
-    return normalize_text(value)
+    """Normalize a business name using the generic text normalizer with Indic transliteration."""
+    if pd.isna(value) or not value:
+        return ""
+    val_str = str(value)
+    for k, v in INDIC_WORD_REPLACEMENTS.items():
+        if k in val_str:
+            val_str = val_str.replace(k, f" {v} ")
+    return normalize_text(val_str)
 
 
 def extract_name_core(name_clean: str) -> str:
     """
-    Remove trailing legal-entity suffixes.
+    Remove trailing legal-entity suffixes, strip web domain extensions and honorific prefixes.
 
     Important:
-        - Only suffixes at the END are removed.
-        - Internal occurrences are preserved.
+        - Trailing suffixes (and common stacked combinations) are removed.
+        - Domain suffixes (.com, .org, etc.) are stripped.
+        - Leading noise/honorific prefixes (e.g. Smt, The, M/s) are stripped.
         - Suffix-only names are preserved.
-        - Multiple stacked suffixes can be removed.
-
-    Examples:
-        'abc technologies private limited'
-            -> 'abc technologies'
-
-        'abc technologies pvt ltd'
-            -> 'abc technologies'
-
-        'limited liability company'
-            -> unchanged
     """
     if not name_clean:
         return ""
 
-    tokens = name_clean.split()
+    # Strip domain extensions like .com, .org, .net, .in, .co
+    name_clean = re.sub(r"\.(com|org|net|in|co|io|biz|info|gov)$", "", name_clean)
+    name_clean = re.sub(r"\s+(com|org|net)$", "", name_clean)
 
+    tokens = name_clean.split()
     if not tokens:
         return ""
 
@@ -206,14 +237,16 @@ def extract_name_core(name_clean: str) -> str:
     if all(token in ALL_LEGAL_SUFFIX_TOKENS for token in tokens):
         return name_clean
 
+    # Strip leading honorific / noise prefixes if more tokens follow
+    if tokens[0] in HONORIFIC_PREFIXES and len(tokens) > 1:
+        tokens = tokens[1:]
+
     current = list(tokens)
 
     while True:
         matched = False
-
         for suffix in LEGAL_SUFFIX_TUPLES:
             suffix_len = len(suffix)
-
             if len(current) <= suffix_len:
                 continue
 
@@ -229,6 +262,16 @@ def extract_name_core(name_clean: str) -> str:
         return name_clean
 
     return " ".join(current)
+
+
+def extract_first_two_tokens(core_name: str) -> str:
+    """Extract first two significant non-stopword tokens from core name."""
+    if not core_name:
+        return ""
+    tokens = [t for t in core_name.split() if t not in GENERIC_BUSINESS_STOPWORDS and len(t) > 1]
+    if len(tokens) >= 2:
+        return " ".join(tokens[:2])
+    return ""
 
 
 # ============================================================
@@ -477,33 +520,124 @@ def normalize_address(value) -> str:
     return normalize_text(value)
 
 
+STREET_TYPES = {
+    "street": "st", "st": "st", "saint": "st",
+    "avenue": "ave", "ave": "ave",
+    "road": "rd", "rd": "rd",
+    "drive": "dr", "dr": "dr",
+    "lane": "ln", "ln": "ln",
+    "court": "ct", "ct": "ct",
+    "boulevard": "blvd", "blvd": "blvd",
+    "way": "way", "place": "pl", "pl": "pl",
+    "circle": "cir", "cir": "cir",
+    "highway": "hwy", "hwy": "hwy",
+    "expressway": "expy", "parkway": "pkwy",
+    "marg": "rd", "rasta": "rd", "salai": "rd", "path": "rd",
+}
+
+US_STATE_MAP = {
+    "alabama": "al", "alaska": "ak", "arizona": "az", "arkansas": "ar", "california": "ca",
+    "colorado": "co", "connecticut": "ct", "delaware": "de", "florida": "fl", "georgia": "ga",
+    "hawaii": "hi", "idaho": "id", "illinois": "il", "indiana": "in", "iowa": "ia",
+    "kansas": "ks", "kentucky": "ky", "louisiana": "la", "maine": "me", "maryland": "md",
+    "massachusetts": "ma", "michigan": "mi", "minnesota": "mn", "mississippi": "ms", "missouri": "mo",
+    "montana": "mt", "nebraska": "ne", "nevada": "nv", "new hampshire": "nh", "new jersey": "nj",
+    "new mexico": "nm", "new york": "ny", "north carolina": "nc", "north dakota": "nd", "ohio": "oh",
+    "oklahoma": "ok", "oregon": "or", "pennsylvania": "pa", "rhode island": "ri", "south carolina": "sc",
+    "south dakota": "sd", "tennessee": "tn", "texas": "tx", "utah": "ut", "vermont": "vt",
+    "virginia": "va", "washington": "wa", "west virginia": "wv", "wisconsin": "wi", "wyoming": "wy",
+}
+
+INDIA_STATE_MAP = {
+    "uttar pradesh": "up", "up": "up", "delhi": "dl", "maharashtra": "mh", "mh": "mh",
+    "karnataka": "ka", "ka": "ka", "tamil nadu": "tn", "tn": "tn", "rajasthan": "rj", "rj": "rj",
+    "gujarat": "gj", "gj": "gj", "west bengal": "wb", "wb": "wb", "haryana": "hr", "hr": "hr",
+    "punjab": "pb", "pb": "pb", "andhra pradesh": "ap", "ap": "ap", "telangana": "tg", "tg": "tg",
+    "ts": "tg", "kerala": "kl", "kl": "kl", "madhya pradesh": "mp", "mp": "mp", "bihar": "br", "br": "br",
+    "odisha": "od", "orissa": "od", "od": "od", "jharkhand": "jh", "jh": "jh", "uttarakhand": "uk",
+    "assam": "as", "as": "as", "goa": "ga", "ga": "ga", "himachal pradesh": "hp", "hp": "hp",
+}
+
+
 def extract_address_components(address_clean: str, country_clean: str = "") -> dict[str, str]:
     """
     Extract lightweight deterministic address components.
 
     Returned fields:
         house_number
+        street_root
         postal_code
+        geo_token
+        address_street_key
+        address_house_geo_key
+        address_house_postcode_key
         address_component_key (composite key of house# + postal + country)
     """
     if not address_clean:
         return {
             "house_number": "",
+            "street_root": "",
             "postal_code": "",
+            "geo_token": "",
+            "address_street_key": "",
+            "address_house_geo_key": "",
+            "address_house_postcode_key": "",
             "address_component_key": "",
         }
 
-    tokens = address_clean.split()
-    house_number = ""
+    # Normalize address_clean to lowercase tokens
+    norm_addr = normalize_text(address_clean)
+    tokens = norm_addr.split()
+    if not tokens:
+        return {
+            "house_number": "",
+            "street_root": "",
+            "postal_code": "",
+            "geo_token": "",
+            "address_street_key": "",
+            "address_house_geo_key": "",
+            "address_house_postcode_key": "",
+            "address_component_key": "",
+        }
 
-    # Capture a leading numeric/address token
-    for token in tokens:
-        if re.match(r"^\d+[a-z]?$", token):
-            house_number = token
+    house_number = ""
+    house_idx = -1
+
+    # First check raw address tokens for unit prefixes like "af-0684", "004303"
+    raw_tokens = str(address_clean).lower().replace(",", " ").split()
+    for i, token in enumerate(raw_tokens):
+        m = re.match(r"^(?:no|door|hno|plot|shop|flat|[a-z]{1,3})?[\.\#\-]?0*(\d+[a-z]?)$", token)
+        if m:
+            house_number = m.group(1)
+            house_idx = i
             break
-        if re.match(r"^\d+[-/]\d+[a-z]?$", token):
-            house_number = token
+        m2 = re.match(r"^([a-z]{0,3}\-?0*\d+[\-\/]\w+.*)$", token)
+        if m2:
+            num_part = re.sub(r"^[a-z]{0,3}\-?0*", "", m2.group(1))
+            house_number = num_part if num_part else m2.group(1)
+            house_idx = i
             break
+
+    # If not found from raw tokens, check normalized tokens
+    if not house_number:
+        for i, token in enumerate(tokens):
+            m = re.match(r"^(?:no|door|hno|plot|shop|flat|[a-z]{1,3})?0*(\d+[a-z]?)$", token)
+            if m:
+                house_number = m.group(1)
+                house_idx = i
+                break
+
+    # Extract primary street root (e.g. "home", "elkins", "swift", "fordsbush", "laytonia")
+    street_root = ""
+    for i, token in enumerate(tokens):
+        if token in STREET_TYPES:
+            if i > 0 and tokens[i - 1] != house_number and len(tokens[i - 1]) > 2:
+                street_root = tokens[i - 1]
+                break
+    if not street_root and house_idx != -1 and house_idx + 1 < len(tokens):
+        nxt = tokens[house_idx + 1]
+        if len(nxt) > 2 and nxt not in STREET_TYPES:
+            street_root = nxt
 
     # Generic postal-code extraction (5-6 digits or alphanumeric postal patterns)
     postal_code = ""
@@ -512,15 +646,45 @@ def extract_address_components(address_clean: str, country_clean: str = "") -> d
             postal_code = token
             break
 
+    # State or locality geo token (check multi-token states first, then single token)
+    geo_token = ""
+    padded_addr = f" {norm_addr} "
+    for state_name, code in INDIA_STATE_MAP.items():
+        if f" {state_name} " in padded_addr:
+            geo_token = code
+            break
+    if not geo_token:
+        for state_name, code in US_STATE_MAP.items():
+            if f" {state_name} " in padded_addr:
+                geo_token = code
+                break
+    if not geo_token:
+        for token in tokens:
+            if token in US_STATE_MAP.values():
+                geo_token = token
+                break
+            if token in INDIA_STATE_MAP.values():
+                geo_token = token
+                break
+
     component_key = ""
     if house_number and postal_code:
         component_key = f"{house_number}_{postal_code}_{country_clean}".strip("_")
     elif postal_code and country_clean:
         component_key = f"post_{postal_code}_{country_clean}"
 
+    street_key = f"{house_number}_{street_root}_{country_clean}".strip("_") if (house_number and street_root) else ""
+    house_geo_key = f"{house_number}_{geo_token}_{country_clean}".strip("_") if (house_number and geo_token) else ""
+    house_postcode_key = f"{house_number}_{postal_code}_{country_clean}".strip("_") if (house_number and postal_code) else ""
+
     return {
         "house_number": house_number,
+        "street_root": street_root,
         "postal_code": postal_code,
+        "geo_token": geo_token,
+        "address_street_key": street_key,
+        "address_house_geo_key": house_geo_key,
+        "address_house_postcode_key": house_postcode_key,
         "address_component_key": component_key,
     }
 
@@ -573,7 +737,7 @@ COUNTRY_ALIASES = {
     # Poland
     "pl": "poland", "pol": "poland", "poland": "poland", "polska": "poland",
     # Belgium
-    "be": "belgium", "bel": "belgium", "belgium": "belgium", "belgique": "belgiu",
+    "be": "belgium", "bel": "belgium", "belgium": "belgium", "belgique": "belgium",
     # Austria
     "at": "austria", "aut": "austria", "austria": "austria", "osterreich": "austria",
     # Ireland
@@ -584,6 +748,38 @@ COUNTRY_ALIASES = {
     "kr": "south korea", "kor": "south korea", "south korea": "south korea", "korea": "south korea",
     # Turkey
     "tr": "turkey", "tur": "turkey", "turkey": "turkey", "turkiye": "turkey",
+    # Norway
+    "no": "norway", "nor": "norway", "norge": "norway",
+    # Denmark
+    "dk": "denmark", "dnk": "denmark", "danmark": "denmark",
+    # Finland
+    "fi": "finland", "fin": "finland", "suomi": "finland",
+    # Portugal
+    "pt": "portugal", "prt": "portugal",
+    # Greece
+    "gr": "greece", "grc": "greece", "hellas": "greece",
+    # Czechia
+    "cz": "czechia", "cze": "czechia", "czech republic": "czechia",
+    # Romania
+    "ro": "romania", "rou": "romania",
+    # Hungary
+    "hu": "hungary", "hun": "hungary",
+    # Argentina
+    "ar": "argentina", "arg": "argentina",
+    # Chile
+    "cl": "chile", "chl": "chile",
+    # Colombia
+    "co": "colombia", "col": "colombia",
+    # Malaysia
+    "my": "malaysia", "mys": "malaysia",
+    # Indonesia
+    "id": "indonesia", "idn": "indonesia",
+    # Thailand
+    "th": "thailand", "tha": "thailand",
+    # Vietnam
+    "vn": "vietnam", "vnm": "vietnam",
+    # Philippines
+    "ph": "philippines", "phl": "philippines",
 }
 
 
@@ -717,6 +913,13 @@ def preprocess_dataframe(df: pd.DataFrame) -> pd.DataFrame:
         .map(significant_token_key)
     )
 
+    df["name_first_two_tokens"] = (
+        df["name_core"]
+        .map(extract_first_two_tokens)
+    )
+
+    df["name_has_digits"] = df["name_clean"].str.contains(r"\d", regex=True, na=False)
+
     # --------------------------------------------------------
     # Business-name statistics useful for P2/P3
     # --------------------------------------------------------
@@ -759,6 +962,8 @@ def preprocess_dataframe(df: pd.DataFrame) -> pd.DataFrame:
         .map(lambda value: len(value.split()) if value else 0)
     )
 
+    df["address_has_digits"] = df["address_clean"].str.contains(r"\d", regex=True, na=False)
+
     # Lightweight structured address features.
     address_components = [
         extract_address_components(addr, ctry)
@@ -766,8 +971,14 @@ def preprocess_dataframe(df: pd.DataFrame) -> pd.DataFrame:
     ]
 
     df["address_house_number"] = [item["house_number"] for item in address_components]
+    df["address_street_root"] = [item["street_root"] for item in address_components]
     df["address_postal_code"] = [item["postal_code"] for item in address_components]
     df["address_component_key"] = [item["address_component_key"] for item in address_components]
+    df["address_street_key"] = [item["address_street_key"] for item in address_components]
+    df["address_house_geo_key"] = [item["address_house_geo_key"] for item in address_components]
+    df["address_house_postcode_key"] = [item["address_house_postcode_key"] for item in address_components]
+
+    df["dedup_group_key"] = df["name_compact"] + "_" + df["address_clean"] + "_" + df["country_clean"]
 
     # --------------------------------------------------------
     # Derived missing flags

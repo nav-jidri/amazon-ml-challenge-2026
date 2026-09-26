@@ -12,7 +12,10 @@ from typing import Dict, Any
 # Default base paths
 BASE_DIR = Path(__file__).resolve().parents[3]
 
-if (BASE_DIR / "dataset" / "train").exists():
+if (BASE_DIR / "code" / "dataset" / "train").exists():
+    TRAIN_DIR = BASE_DIR / "code" / "dataset" / "train"
+    TEST_DIR = BASE_DIR / "code" / "dataset" / "test"
+elif (BASE_DIR / "dataset" / "train").exists():
     TRAIN_DIR = BASE_DIR / "dataset" / "train"
     TEST_DIR = BASE_DIR / "dataset" / "test"
 elif (BASE_DIR.parent / "ml_dataset" / "data" / "train").exists():
@@ -22,8 +25,8 @@ elif (BASE_DIR / "ml_dataset" / "data" / "train").exists():
     TRAIN_DIR = BASE_DIR / "ml_dataset" / "data" / "train"
     TEST_DIR = BASE_DIR / "ml_dataset" / "data" / "test"
 else:
-    TRAIN_DIR = BASE_DIR / "dataset" / "train"
-    TEST_DIR = BASE_DIR / "dataset" / "test"
+    TRAIN_DIR = BASE_DIR / "code" / "dataset" / "train"
+    TEST_DIR = BASE_DIR / "code" / "dataset" / "test"
 
 OUTPUT_DIR = BASE_DIR / "amazon-ml-challenge-2026" / "output" if (BASE_DIR / "amazon-ml-challenge-2026" / "output").exists() else BASE_DIR / "output"
 MODEL_DIR = Path(__file__).resolve().parent / "artifacts"

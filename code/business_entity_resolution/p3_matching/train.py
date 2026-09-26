@@ -57,6 +57,7 @@ def load_ground_truth(gt_path: Path) -> Dict[str, Set[str]]:
 def extract_training_and_val_data(
     train_dir: Path,
     max_s1_records: int = 25000,
+    max_s23_records: int = 300000,
     val_ratio: float = 0.2,
     chunksize: int = 50000,
     random_seed: int = 42
@@ -91,64 +92,11 @@ def extract_training_and_val_data(
     ground_truth = load_ground_truth(gt_path)
     print(f"  Loaded ground truth for {len(ground_truth):,} Source 1 entities.")
 
-    # 2. Store preprocessed record metadata and build blocking indexes from S2/S3
-    records_s1: Dict[str, Dict[str, Any]] = {}
-    records_s23: Dict[str, Dict[str, Any]] = {}
-
-    indexes = Indexes()
-    for src_path in [s2_path, s3_path]:
-        print(f"  Indexing {src_path.name}...")
-        for chunk in iter_preprocessed_file(src_path, chunksize=chunksize):
-            col_core = chunk["name_core"] if "name_core" in chunk else [""] * len(chunk)
-            col_phon = chunk["name_phonetic_key"] if "name_phonetic_key" in chunk else [""] * len(chunk)
-            col_nascii = chunk["name_ascii_compact"] if "name_ascii_compact" in chunk else [""] * len(chunk)
-            col_nsig = chunk["name_significant_token_key"] if "name_significant_token_key" in chunk else [""] * len(chunk)
-            col_acomp = chunk["address_component_key"] if "address_component_key" in chunk else [""] * len(chunk)
-
-            for eid, nclean, ncomp, ncore, ntk, nphon, nascii, nsig, acomp, aclean, atk, cclean in zip(
-                chunk["entity_id"],
-                chunk["name_clean"],
-                chunk["name_compact"],
-                col_core,
-                chunk["name_token_key"],
-                col_phon,
-                col_nascii,
-                col_nsig,
-                col_acomp,
-                chunk["address_clean"],
-                chunk["address_token_key"],
-                chunk["country_clean"]
-            ):
-                eid_str = str(eid).strip()
-                if not eid_str:
-                    continue
-                records_s23[eid_str] = {
-                    "name_clean": nclean,
-                    "name_compact": ncomp,
-                    "name_core": ncore,
-                    "name_token_key": ntk,
-                    "address_clean": aclean,
-                    "address_token_key": atk,
-                    "country_clean": cclean,
-                }
-                indexes.add_record(
-                    entity_id=eid_str,
-                    name_token_key=str(ntk).strip() if ntk else "",
-                    name_compact=str(ncomp).strip() if ncomp else "",
-                    name_core=str(ncore).strip() if ncore else "",
-                    address_token_key=str(atk).strip() if atk else "",
-                    name_phonetic_key=str(nphon).strip() if nphon else "",
-                    name_ascii_compact=str(nascii).strip() if nascii else "",
-                    name_significant_token_key=str(nsig).strip() if nsig else "",
-                    address_component_key=str(acomp).strip() if acomp else "",
-                )
-
-    print(f"Total S2/S3 indexed records: {len(records_s23):,}")
-
-    # 3. Stream S1 and collect candidates
+    # 2. Stream S1 entities first (up to max_s1_records)
     print(f"Streaming S1 records (up to {max_s1_records:,})...")
+    records_s1: Dict[str, Dict[str, Any]] = {}
     s1_ids_ordered: List[str] = []
-    s1_candidates_map: Dict[str, Set[str]] = {}
+    s1_rows: List[Dict[str, Any]] = []
 
     s1_count = 0
     for chunk in iter_preprocessed_file(s1_path, chunksize=chunksize):
@@ -157,21 +105,26 @@ def extract_training_and_val_data(
             if not s1_id:
                 continue
 
-            records_s1[s1_id] = {
+            row_dict = {
+                "entity_id": s1_id,
                 "name_clean": row.get("name_clean", ""),
                 "name_compact": row.get("name_compact", ""),
                 "name_core": row.get("name_core", ""),
+                "name_ascii_compact": row.get("name_ascii_compact", ""),
+                "name_significant_token_key": row.get("name_significant_token_key", ""),
+                "name_first_two_tokens": row.get("name_first_two_tokens", ""),
                 "name_token_key": row.get("name_token_key", ""),
                 "address_clean": row.get("address_clean", ""),
                 "address_token_key": row.get("address_token_key", ""),
+                "address_component_key": row.get("address_component_key", ""),
+                "address_street_key": row.get("address_street_key", ""),
+                "address_house_number": row.get("address_house_number", ""),
+                "address_postal_code": row.get("address_postal_code", ""),
                 "country_clean": row.get("country_clean", ""),
             }
-
-            candidates = indexes.retrieve_candidates_for_row(row)
-            candidates.discard(s1_id)
-
+            records_s1[s1_id] = row_dict
+            s1_rows.append(row_dict)
             s1_ids_ordered.append(s1_id)
-            s1_candidates_map[s1_id] = candidates
 
             s1_count += 1
             if s1_count >= max_s1_records:
@@ -181,7 +134,115 @@ def extract_training_and_val_data(
 
     print(f"Processed {len(s1_ids_ordered):,} S1 entities.")
 
-    # 4. Split S1 entities into Train and Validation holdout sets
+    # Collect all true match IDs for these S1 records
+    target_s23_ids: Set[str] = set()
+    for s1_id in s1_ids_ordered:
+        target_s23_ids.update(ground_truth.get(s1_id, set()))
+    print(f"  Target true ground truth matches to guarantee: {len(target_s23_ids):,}")
+
+    # 3. Store preprocessed record metadata and build blocking indexes from S2/S3
+    records_s23: Dict[str, Dict[str, Any]] = {}
+    indexes = Indexes()
+
+    for src_path in [s2_path, s3_path]:
+        print(f"  Indexing {src_path.name}...")
+        source_prefix = "S2" if "source2" in src_path.name.lower() else "S3"
+        needed_for_source = {eid for eid in target_s23_ids if eid.startswith(source_prefix)}
+        found_target_ids: Set[str] = set()
+        src_indexed_count = 0
+
+        for chunk in iter_preprocessed_file(src_path, chunksize=chunksize):
+            col_core = chunk["name_core"] if "name_core" in chunk else [""] * len(chunk)
+            col_phon = chunk["name_phonetic_key"] if "name_phonetic_key" in chunk else [""] * len(chunk)
+            col_nascii = chunk["name_ascii_compact"] if "name_ascii_compact" in chunk else [""] * len(chunk)
+            col_nsig = chunk["name_significant_token_key"] if "name_significant_token_key" in chunk else [""] * len(chunk)
+            col_ntwo = chunk["name_first_two_tokens"] if "name_first_two_tokens" in chunk else [""] * len(chunk)
+            col_acomp = chunk["address_component_key"] if "address_component_key" in chunk else [""] * len(chunk)
+            col_astreet = chunk["address_street_key"] if "address_street_key" in chunk else [""] * len(chunk)
+            col_ahouse = chunk["address_house_number"] if "address_house_number" in chunk else [""] * len(chunk)
+            col_ahouse_geo = chunk["address_house_geo_key"] if "address_house_geo_key" in chunk else [""] * len(chunk)
+            col_apost = chunk["address_house_postcode_key"] if "address_house_postcode_key" in chunk else [""] * len(chunk)
+            col_post = chunk["address_postal_code"] if "address_postal_code" in chunk else [""] * len(chunk)
+
+            for eid, nclean, ncomp, ncore, ntk, nphon, nascii, nsig, ntwo, acomp, astreet, ahouse, ahouse_geo, apost, post, aclean, atk, cclean in zip(
+                chunk["entity_id"],
+                chunk["name_clean"],
+                chunk["name_compact"],
+                col_core,
+                chunk["name_token_key"],
+                col_phon,
+                col_nascii,
+                col_nsig,
+                col_ntwo,
+                col_acomp,
+                col_astreet,
+                col_ahouse,
+                col_ahouse_geo,
+                col_apost,
+                col_post,
+                chunk["address_clean"],
+                chunk["address_token_key"],
+                chunk["country_clean"]
+            ):
+                eid_str = str(eid).strip()
+                if not eid_str:
+                    continue
+
+                is_target = eid_str in needed_for_source
+                if is_target:
+                    found_target_ids.add(eid_str)
+
+                # Keep if we haven't reached max_s23_records OR if it's a target true match
+                if max_s23_records <= 0 or src_indexed_count < max_s23_records or is_target:
+                    records_s23[eid_str] = {
+                        "name_clean": nclean,
+                        "name_compact": ncomp,
+                        "name_core": ncore,
+                        "name_ascii_compact": nascii,
+                        "name_significant_token_key": nsig,
+                        "name_first_two_tokens": ntwo,
+                        "name_token_key": ntk,
+                        "address_clean": aclean,
+                        "address_token_key": atk,
+                        "address_component_key": acomp,
+                        "address_street_key": astreet,
+                        "address_house_number": ahouse,
+                        "address_postal_code": post,
+                        "country_clean": cclean,
+                    }
+                    indexes.add_record(
+                        entity_id=eid_str,
+                        name_token_key=str(ntk).strip() if ntk else "",
+                        name_compact=str(ncomp).strip() if ncomp else "",
+                        name_core=str(ncore).strip() if ncore else "",
+                        address_token_key=str(atk).strip() if atk else "",
+                        name_phonetic_key=str(nphon).strip() if nphon else "",
+                        name_ascii_compact=str(nascii).strip() if nascii else "",
+                        name_significant_token_key=str(nsig).strip() if nsig else "",
+                        name_first_two_tokens=str(ntwo).strip() if ntwo else "",
+                        address_component_key=str(acomp).strip() if acomp else "",
+                        address_street_key=str(astreet).strip() if astreet else "",
+                        address_house_geo_key=str(ahouse_geo).strip() if ahouse_geo else "",
+                        address_house_postcode_key=str(apost).strip() if apost else "",
+                    )
+                    src_indexed_count += 1
+
+            if max_s23_records > 0 and src_indexed_count >= max_s23_records and len(found_target_ids) >= len(needed_for_source):
+                break
+
+    print(f"Total S2/S3 indexed records: {len(records_s23):,}")
+
+    # 4. Stream S1 and collect candidates
+    print(f"Retrieving candidates for {len(s1_rows):,} S1 entities...")
+    s1_candidates_map: Dict[str, Set[str]] = {}
+
+    for row_dict in s1_rows:
+        s1_id = row_dict["entity_id"]
+        candidates = indexes.retrieve_candidates_for_row(row_dict)
+        candidates.discard(s1_id)
+        s1_candidates_map[s1_id] = candidates
+
+    # 5. Split S1 entities into Train and Validation holdout sets
     rng = np.random.RandomState(random_seed)
     shuffled_s1 = s1_ids_ordered.copy()
     rng.shuffle(shuffled_s1)
@@ -193,7 +254,7 @@ def extract_training_and_val_data(
     print(f"  Train S1 entities: {len(train_s1_set):,}")
     print(f"  Holdout Val S1 entities: {len(val_s1_set):,}")
 
-    # 5. Build Training Pairs
+    # 6. Build Training Pairs
     train_labeled_pairs: List[Tuple[str, str, int]] = []
     for s1_id in train_s1_set:
         cands = s1_candidates_map.get(s1_id, set())
@@ -209,13 +270,12 @@ def extract_training_and_val_data(
             if true_id in records_s23 and true_id not in cands:
                 train_labeled_pairs.append((s1_id, true_id, 1))
 
-    # 6. Build Validation Holdout Candidate Pairs & Ground Truth
+    # 7. Build Validation Holdout Candidate Pairs & Ground Truth
     val_candidate_pairs: List[Tuple[str, str]] = []
     val_candidates_by_s1: Dict[str, Set[str]] = {}
     val_ground_truth: Dict[str, Set[str]] = {}
 
     for s1_id in val_s1_set:
-        # Every validation S1 entity is in val_ground_truth (including singletons!)
         val_ground_truth[s1_id] = ground_truth.get(s1_id, set())
 
         cands = s1_candidates_map.get(s1_id, set())
@@ -239,6 +299,7 @@ def extract_training_and_val_data(
 def train_p3_model(
     config: P3Config,
     max_train_records: int = 25000,
+    max_s23_records: int = 300000,
     val_ratio: float = 0.2
 ) -> Tuple[XGBClassifier, Dict[str, Any]]:
     """Train XGBoost matching model with genuine entity-level holdout evaluation."""
@@ -256,6 +317,7 @@ def train_p3_model(
     ) = extract_training_and_val_data(
         config.train_dir,
         max_s1_records=max_train_records,
+        max_s23_records=max_s23_records,
         val_ratio=val_ratio,
         chunksize=config.chunksize,
         random_seed=config.random_seed
@@ -396,11 +458,12 @@ def train_p3_model(
 def main() -> int:
     parser = argparse.ArgumentParser(description="Train P3 Matching Model")
     parser.add_argument("--max-records", type=int, default=25000, help="Max S1 records for training pairs")
+    parser.add_argument("--max-s23-records", type=int, default=300000, help="Max S2/S3 records to index (0 for all)")
     parser.add_argument("--val-ratio", type=float, default=0.2, help="Validation split ratio")
     args = parser.parse_args()
 
     config = P3Config()
-    train_p3_model(config, max_train_records=args.max_records, val_ratio=args.val_ratio)
+    train_p3_model(config, max_train_records=args.max_records, max_s23_records=args.max_s23_records, val_ratio=args.val_ratio)
     return 0
 
 

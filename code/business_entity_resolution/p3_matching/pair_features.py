@@ -53,6 +53,14 @@ FEATURE_NAMES = [
     "name_addr_joint_jaccard",       # name_token_jaccard * addr_token_jaccard
     "name_empty_either",             # 1 if either record name is missing/empty
     "addr_empty_either",             # 1 if either record address is missing/empty
+
+    # --- Discriminative Street & House Number Features ---
+    "addr_street_key_match",         # Exact match on address_street_key
+    "addr_house_num_match",          # Exact match on house_number
+    "addr_house_num_mismatch",       # 1 if both have house numbers and they differ (critical negative)
+    "addr_postcode_mismatch",        # 1 if both have postal codes and they differ (critical negative)
+    "name_first_two_tokens_match",   # Exact match on name_first_two_tokens
+    "name_first_two_tokens_overlap", # Count of shared leading tokens
 ]
 
 
@@ -195,6 +203,25 @@ def compute_pair_feature_vector(
     name_empty_either = 1.0 if (not name_a or not name_b) else 0.0
     addr_empty_either = 1.0 if (not addr_a or not addr_b) else 0.0
 
+    # Discriminative Street & House Number Features
+    street_a = precomputed_a.get("street_a") if precomputed_a else _safe_str(rec_a.get("address_street_key", ""))
+    street_b = _safe_str(rec_b.get("address_street_key", ""))
+    house_a = precomputed_a.get("house_a") if precomputed_a else _safe_str(rec_a.get("address_house_number", ""))
+    house_b = _safe_str(rec_b.get("address_house_number", ""))
+
+    addr_street_key_match = 1.0 if (street_a and street_b and street_a == street_b) else 0.0
+    addr_house_num_match = 1.0 if (house_a and house_b and house_a == house_b) else 0.0
+    addr_house_num_mismatch = 1.0 if (house_a and house_b and house_a != house_b) else 0.0
+    addr_postcode_mismatch = 1.0 if (post_a and post_b and post_a != post_b) else 0.0
+
+    two_toks_a = precomputed_a.get("two_toks_a") if precomputed_a else _safe_str(rec_a.get("name_first_two_tokens", ""))
+    two_toks_b = _safe_str(rec_b.get("name_first_two_tokens", ""))
+    name_two_tokens_match = 1.0 if (two_toks_a and two_toks_b and two_toks_a == two_toks_b) else 0.0
+
+    s_two_a = set(two_toks_a.split()) if two_toks_a else set()
+    s_two_b = set(two_toks_b.split()) if two_toks_b else set()
+    name_first_two_tokens_overlap = float(len(s_two_a & s_two_b))
+
     return [
         name_exact_clean,
         name_exact_compact,
@@ -228,6 +255,12 @@ def compute_pair_feature_vector(
         name_addr_joint_jaccard,
         name_empty_either,
         addr_empty_either,
+        addr_street_key_match,
+        addr_house_num_match,
+        addr_house_num_mismatch,
+        addr_postcode_mismatch,
+        name_two_tokens_match,
+        name_first_two_tokens_overlap,
     ]
 
 
@@ -244,7 +277,8 @@ def build_feature_matrix(
     rows = []
     dummy_rec = {
         "name_clean": "", "name_compact": "", "name_core": "", "name_token_key": "",
-        "address_clean": "", "address_token_key": "", "country_clean": ""
+        "address_clean": "", "address_token_key": "", "country_clean": "",
+        "address_street_key": "", "address_house_number": "", "name_first_two_tokens": "",
     }
     s1_cache: Dict[str, Dict[str, Any]] = {}
 
@@ -265,6 +299,9 @@ def build_feature_matrix(
                 "nums_a": {t for t in addr_toks_a if re.match(r"^\d+$", t)},
                 "addr_ng3_a": _get_char_ngrams(addr_a, 3),
                 "len_aa": len(addr_a),
+                "street_a": _safe_str(rec_a.get("address_street_key", "")),
+                "house_a": _safe_str(rec_a.get("address_house_number", "")),
+                "two_toks_a": _safe_str(rec_a.get("name_first_two_tokens", "")),
             }
 
         rec_a = records_s1.get(s1_id, dummy_rec)

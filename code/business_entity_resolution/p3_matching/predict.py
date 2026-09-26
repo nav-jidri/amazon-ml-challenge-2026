@@ -30,9 +30,33 @@ def load_normalized_records(
     source1_path: Path,
     source2_path: Path,
     source3_path: Path,
+    candidate_pairs_path: Optional[Path] = None,
     chunksize: int = 100_000
 ) -> Tuple[Dict[str, Dict[str, Any]], Dict[str, Dict[str, Any]]]:
     """Load normalized representation dictionaries for S1 and S2/S3."""
+    needed_s1: Optional[Set[str]] = None
+    needed_s23: Optional[Set[str]] = None
+
+    if candidate_pairs_path and candidate_pairs_path.exists():
+        print(f"Scanning {candidate_pairs_path.name} to identify required entity representations...")
+        needed_s1 = set()
+        needed_s23 = set()
+        with open(candidate_pairs_path, "r", encoding="utf-8") as f:
+            next(f, None)  # header
+            for line in f:
+                parts = line.strip().split("\t")
+                if not parts:
+                    continue
+                s1_id = parts[0].strip()
+                if s1_id:
+                    needed_s1.add(s1_id)
+                if len(parts) > 1 and parts[1].strip():
+                    for cand in parts[1].split(","):
+                        cand = cand.strip()
+                        if cand:
+                            needed_s23.add(cand)
+        print(f"  Target required entities: {len(needed_s1):,} S1, {len(needed_s23):,} S2/S3 candidates.")
+
     print("Loading normalized representations for inference...")
     records_s1: Dict[str, Dict[str, Any]] = {}
     records_s23: Dict[str, Dict[str, Any]] = {}
@@ -44,38 +68,50 @@ def load_normalized_records(
             col_core = chunk["name_core"] if "name_core" in chunk else [""] * len(chunk)
             col_nascii = chunk["name_ascii_compact"] if "name_ascii_compact" in chunk else [""] * len(chunk)
             col_nsig = chunk["name_significant_token_key"] if "name_significant_token_key" in chunk else [""] * len(chunk)
+            col_ntwo = chunk["name_first_two_tokens"] if "name_first_two_tokens" in chunk else [""] * len(chunk)
             col_acomp = chunk["address_component_key"] if "address_component_key" in chunk else [""] * len(chunk)
+            col_astreet = chunk["address_street_key"] if "address_street_key" in chunk else [""] * len(chunk)
+            col_ahouse = chunk["address_house_number"] if "address_house_number" in chunk else [""] * len(chunk)
             col_post = chunk["address_postal_code"] if "address_postal_code" in chunk else [""] * len(chunk)
 
-            for eid, nclean, ncomp, ncore, nascii, nsig, ntk, aclean, atk, acomp, post, cclean in zip(
+            for eid, nclean, ncomp, ncore, nascii, nsig, ntwo, ntk, aclean, atk, acomp, astreet, ahouse, post, cclean in zip(
                 chunk["entity_id"],
                 chunk["name_clean"],
                 chunk["name_compact"],
                 col_core,
                 col_nascii,
                 col_nsig,
+                col_ntwo,
                 chunk["name_token_key"],
                 chunk["address_clean"],
                 chunk["address_token_key"],
                 col_acomp,
+                col_astreet,
+                col_ahouse,
                 col_post,
                 chunk["country_clean"]
             ):
                 eid_str = str(eid).strip()
-                if eid_str:
-                    records_s23[eid_str] = {
-                        "name_clean": nclean,
-                        "name_compact": ncomp,
-                        "name_core": ncore,
-                        "name_ascii_compact": nascii,
-                        "name_significant_token_key": nsig,
-                        "name_token_key": ntk,
-                        "address_clean": aclean,
-                        "address_token_key": atk,
-                        "address_component_key": acomp,
-                        "address_postal_code": post,
-                        "country_clean": cclean,
-                    }
+                if not eid_str:
+                    continue
+                if needed_s23 is not None and eid_str not in needed_s23:
+                    continue
+                records_s23[eid_str] = {
+                    "name_clean": nclean,
+                    "name_compact": ncomp,
+                    "name_core": ncore,
+                    "name_ascii_compact": nascii,
+                    "name_significant_token_key": nsig,
+                    "name_first_two_tokens": ntwo,
+                    "name_token_key": ntk,
+                    "address_clean": aclean,
+                    "address_token_key": atk,
+                    "address_component_key": acomp,
+                    "address_street_key": astreet,
+                    "address_house_number": ahouse,
+                    "address_postal_code": post,
+                    "country_clean": cclean,
+                }
 
     print(f"  Loaded {len(records_s23):,} S2/S3 records.")
 
@@ -85,38 +121,50 @@ def load_normalized_records(
         col_core = chunk["name_core"] if "name_core" in chunk else [""] * len(chunk)
         col_nascii = chunk["name_ascii_compact"] if "name_ascii_compact" in chunk else [""] * len(chunk)
         col_nsig = chunk["name_significant_token_key"] if "name_significant_token_key" in chunk else [""] * len(chunk)
+        col_ntwo = chunk["name_first_two_tokens"] if "name_first_two_tokens" in chunk else [""] * len(chunk)
         col_acomp = chunk["address_component_key"] if "address_component_key" in chunk else [""] * len(chunk)
+        col_astreet = chunk["address_street_key"] if "address_street_key" in chunk else [""] * len(chunk)
+        col_ahouse = chunk["address_house_number"] if "address_house_number" in chunk else [""] * len(chunk)
         col_post = chunk["address_postal_code"] if "address_postal_code" in chunk else [""] * len(chunk)
 
-        for eid, nclean, ncomp, ncore, nascii, nsig, ntk, aclean, atk, acomp, post, cclean in zip(
+        for eid, nclean, ncomp, ncore, nascii, nsig, ntwo, ntk, aclean, atk, acomp, astreet, ahouse, post, cclean in zip(
             chunk["entity_id"],
             chunk["name_clean"],
             chunk["name_compact"],
             col_core,
             col_nascii,
             col_nsig,
+            col_ntwo,
             chunk["name_token_key"],
             chunk["address_clean"],
             chunk["address_token_key"],
             col_acomp,
+            col_astreet,
+            col_ahouse,
             col_post,
             chunk["country_clean"]
         ):
             eid_str = str(eid).strip()
-            if eid_str:
-                records_s1[eid_str] = {
-                    "name_clean": nclean,
-                    "name_compact": ncomp,
-                    "name_core": ncore,
-                    "name_ascii_compact": nascii,
-                    "name_significant_token_key": nsig,
-                    "name_token_key": ntk,
-                    "address_clean": aclean,
-                    "address_token_key": atk,
-                    "address_component_key": acomp,
-                    "address_postal_code": post,
-                    "country_clean": cclean,
-                }
+            if not eid_str:
+                continue
+            if needed_s1 is not None and eid_str not in needed_s1:
+                continue
+            records_s1[eid_str] = {
+                "name_clean": nclean,
+                "name_compact": ncomp,
+                "name_core": ncore,
+                "name_ascii_compact": nascii,
+                "name_significant_token_key": nsig,
+                "name_first_two_tokens": ntwo,
+                "name_token_key": ntk,
+                "address_clean": aclean,
+                "address_token_key": atk,
+                "address_component_key": acomp,
+                "address_street_key": astreet,
+                "address_house_number": ahouse,
+                "address_postal_code": post,
+                "country_clean": cclean,
+            }
 
     print(f"  Loaded {len(records_s1):,} S1 records.")
     return records_s1, records_s23
@@ -213,7 +261,9 @@ def main() -> int:
     s2_path = args.source2 or (config.test_dir / "test_source2.tsv")
     s3_path = args.source3 or (config.test_dir / "test_source3.tsv")
 
-    recs_s1, recs_s23 = load_normalized_records(s1_path, s2_path, s3_path, chunksize=config.chunksize)
+    recs_s1, recs_s23 = load_normalized_records(
+        s1_path, s2_path, s3_path, candidate_pairs_path=cand_path, chunksize=config.chunksize
+    )
     score_candidate_pairs(cand_path, out_path, model_path, recs_s1, recs_s23)
     return 0
 

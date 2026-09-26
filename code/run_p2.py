@@ -13,7 +13,12 @@ dataset later.
 from __future__ import annotations
 
 import argparse
+import sys
 from pathlib import Path
+
+code_dir = str(Path(__file__).resolve().parent)
+if code_dir not in sys.path:
+    sys.path.insert(0, code_dir)
 
 from business_entity_resolution.candidate_generation import generate_candidate_pairs
 

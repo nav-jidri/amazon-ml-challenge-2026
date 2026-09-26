@@ -78,6 +78,10 @@ class Indexes:
         self.name_significant_token_key: Dict[str, List[str]] = {}
         self.address_token_key: Dict[str, List[str]] = {}
         self.address_component_key: Dict[str, List[str]] = {}
+        self.address_street_key: Dict[str, List[str]] = {}
+        self.address_house_geo_key: Dict[str, List[str]] = {}
+        self.address_house_postcode_key: Dict[str, List[str]] = {}
+        self.name_first_two_tokens: Dict[str, List[str]] = {}
         self.name_phonetic_key: Dict[str, List[str]] = {}
         self.name_char_ngram: Dict[str, List[str]] = {}
 
@@ -104,31 +108,33 @@ class Indexes:
         name_ascii_compact: str = "",
         name_significant_token_key: str = "",
         address_component_key: str = "",
+        address_street_key: str = "",
+        address_house_geo_key: str = "",
+        address_house_postcode_key: str = "",
+        name_first_two_tokens: str = "",
     ) -> None:
-        """Insert an entity into inverted indexes."""
-        if name_token_key:
-            self.name_token_key.setdefault(name_token_key, []).append(entity_id)
+        """Insert an entity into inverted indexes with bounded posting growth."""
+        def _add_bounded(idx: Dict[str, List[str]], key: str, cap: int = MAX_KEY_POSTINGS):
+            if not key:
+                return
+            lst = idx.get(key)
+            if lst is None:
+                idx[key] = [entity_id]
+            elif len(lst) <= cap:
+                lst.append(entity_id)
 
-        if name_compact:
-            self.name_compact.setdefault(name_compact, []).append(entity_id)
-
-        if name_core:
-            self.name_core.setdefault(name_core, []).append(entity_id)
-
-        if name_ascii_compact:
-            self.name_ascii_compact.setdefault(name_ascii_compact, []).append(entity_id)
-
-        if name_significant_token_key:
-            self.name_significant_token_key.setdefault(name_significant_token_key, []).append(entity_id)
-
-        if address_token_key:
-            self.address_token_key.setdefault(address_token_key, []).append(entity_id)
-
-        if address_component_key:
-            self.address_component_key.setdefault(address_component_key, []).append(entity_id)
-
-        if name_phonetic_key:
-            self.name_phonetic_key.setdefault(name_phonetic_key, []).append(entity_id)
+        _add_bounded(self.name_token_key, name_token_key)
+        _add_bounded(self.name_compact, name_compact)
+        _add_bounded(self.name_core, name_core)
+        _add_bounded(self.name_ascii_compact, name_ascii_compact)
+        _add_bounded(self.name_significant_token_key, name_significant_token_key)
+        _add_bounded(self.name_first_two_tokens, name_first_two_tokens, cap=1000)
+        _add_bounded(self.address_token_key, address_token_key)
+        _add_bounded(self.address_component_key, address_component_key)
+        _add_bounded(self.address_street_key, address_street_key)
+        _add_bounded(self.address_house_geo_key, address_house_geo_key, cap=1000)
+        _add_bounded(self.address_house_postcode_key, address_house_postcode_key)
+        _add_bounded(self.name_phonetic_key, name_phonetic_key, cap=1000)
 
     def add(self, entity_id: str, row: Any) -> None:
         """Add a single pre-processed row to the indexes."""
@@ -147,6 +153,10 @@ class Indexes:
             name_ascii_compact=str(get_val("name_ascii_compact", "") or ""),
             name_significant_token_key=str(get_val("name_significant_token_key", "") or ""),
             address_component_key=str(get_val("address_component_key", "") or ""),
+            address_street_key=str(get_val("address_street_key", "") or ""),
+            address_house_geo_key=str(get_val("address_house_geo_key", "") or ""),
+            address_house_postcode_key=str(get_val("address_house_postcode_key", "") or ""),
+            name_first_two_tokens=str(get_val("name_first_two_tokens", "") or ""),
         )
 
     # ------------------------------------------------------------------
@@ -179,7 +189,9 @@ class Indexes:
         self.char_ngram_stats["total_unique_ngrams_seen"] += len(grams)
 
         for gram in grams:
-            ngram_postings[gram].add(entity_id)
+            postings = ngram_postings[gram]
+            if len(postings) <= MAX_NGRAM_POSTINGS:
+                postings.add(entity_id)
 
     def _finalize_char_ngram_index(
         self,
@@ -273,8 +285,12 @@ class Indexes:
                 col_ncore = chunk["name_core"] if "name_core" in chunk else [""] * len(chunk)
                 col_nascii = chunk["name_ascii_compact"] if "name_ascii_compact" in chunk else [""] * len(chunk)
                 col_nsig = chunk["name_significant_token_key"] if "name_significant_token_key" in chunk else [""] * len(chunk)
+                col_ntwo = chunk["name_first_two_tokens"] if "name_first_two_tokens" in chunk else [""] * len(chunk)
                 col_atk = chunk["address_token_key"] if "address_token_key" in chunk else [""] * len(chunk)
                 col_acomp = chunk["address_component_key"] if "address_component_key" in chunk else [""] * len(chunk)
+                col_astreet = chunk["address_street_key"] if "address_street_key" in chunk else [""] * len(chunk)
+                col_ahouse_geo = chunk["address_house_geo_key"] if "address_house_geo_key" in chunk else [""] * len(chunk)
+                col_apost = chunk["address_house_postcode_key"] if "address_house_postcode_key" in chunk else [""] * len(chunk)
                 col_nphon = chunk["name_phonetic_key"] if "name_phonetic_key" in chunk else [""] * len(chunk)
                 col_aclean = chunk["address_clean"] if "address_clean" in chunk else [""] * len(chunk)
                 col_cclean = chunk["country_clean"] if "country_clean" in chunk else [""] * len(chunk)
@@ -288,7 +304,11 @@ class Indexes:
                     nphon,
                     nascii,
                     nsig,
+                    ntwo,
                     acomp,
+                    astreet,
+                    ahouse_geo,
+                    apost,
                     aclean,
                     cclean,
                 ) in zip(
@@ -300,7 +320,11 @@ class Indexes:
                     col_nphon,
                     col_nascii,
                     col_nsig,
+                    col_ntwo,
                     col_acomp,
+                    col_astreet,
+                    col_ahouse_geo,
+                    col_apost,
                     col_aclean,
                     col_cclean,
                 ):
@@ -359,7 +383,11 @@ class Indexes:
                     nphon_str = str(nphon).strip() if nphon and not pd.isna(nphon) else ""
                     nascii_str = str(nascii).strip() if nascii and not pd.isna(nascii) else ""
                     nsig_str = str(nsig).strip() if nsig and not pd.isna(nsig) else ""
+                    ntwo_str = str(ntwo).strip() if ntwo and not pd.isna(ntwo) else ""
                     acomp_str = str(acomp).strip() if acomp and not pd.isna(acomp) else ""
+                    astreet_str = str(astreet).strip() if astreet and not pd.isna(astreet) else ""
+                    ahouse_geo_str = str(ahouse_geo).strip() if ahouse_geo and not pd.isna(ahouse_geo) else ""
+                    apost_str = str(apost).strip() if apost and not pd.isna(apost) else ""
 
                     self.add_record(
                         entity_id=eid_str,
@@ -370,7 +398,11 @@ class Indexes:
                         name_phonetic_key=nphon_str,
                         name_ascii_compact=nascii_str,
                         name_significant_token_key=nsig_str,
+                        name_first_two_tokens=ntwo_str,
                         address_component_key=acomp_str,
+                        address_street_key=astreet_str,
+                        address_house_geo_key=ahouse_geo_str,
+                        address_house_postcode_key=apost_str,
                     )
 
                     # --------------------------------------------------
@@ -395,14 +427,14 @@ class Indexes:
     # Retrieval helpers (with frequency filtering)
     # ------------------------------------------------------------------
 
-    def _safe_retrieve(self, index: Dict[str, List[str]], key: str) -> Set[str]:
+    def _safe_retrieve(self, index: Dict[str, List[str]], key: str, max_postings: int = MAX_KEY_POSTINGS) -> Set[str]:
         """Retrieve postings with frequency filtering to prevent explosive candidate sets."""
         if not key:
             return set()
         postings = index.get(key)
         if not postings:
             return set()
-        if len(postings) > MAX_KEY_POSTINGS:
+        if len(postings) > max_postings:
             return set()
         return set(postings)
 
@@ -421,14 +453,26 @@ class Indexes:
     def retrieve_by_significant_token(self, key: str) -> Set[str]:
         return self._safe_retrieve(self.name_significant_token_key, key)
 
+    def retrieve_by_name_first_two_tokens(self, key: str) -> Set[str]:
+        return self._safe_retrieve(self.name_first_two_tokens, key, max_postings=1000)
+
     def retrieve_by_address_token(self, key: str) -> Set[str]:
         return self._safe_retrieve(self.address_token_key, key)
 
     def retrieve_by_address_component(self, key: str) -> Set[str]:
         return self._safe_retrieve(self.address_component_key, key)
 
+    def retrieve_by_address_street(self, key: str) -> Set[str]:
+        return self._safe_retrieve(self.address_street_key, key)
+
+    def retrieve_by_address_house_geo(self, key: str) -> Set[str]:
+        return self._safe_retrieve(self.address_house_geo_key, key, max_postings=1000)
+
+    def retrieve_by_address_house_postcode(self, key: str) -> Set[str]:
+        return self._safe_retrieve(self.address_house_postcode_key, key)
+
     def retrieve_by_phonetic(self, key: str) -> Set[str]:
-        return self._safe_retrieve(self.name_phonetic_key, key)
+        return self._safe_retrieve(self.name_phonetic_key, key, max_postings=1000)
 
     def retrieve_by_char_ngrams(
         self,
@@ -483,23 +527,36 @@ class Indexes:
         candidates.update(self.retrieve_by_name_core(ncore))
         candidates.update(self.retrieve_by_name_ascii_compact(nascii))
 
-        # Pass 3: Significant Tokens
-        nsig = str(get_val("name_significant_token_key", "") or "")
-        candidates.update(self.retrieve_by_significant_token(nsig))
-
-        # Pass 4: Address Token & Address Component Key
-        atk = str(get_val("address_token_key", "") or "")
+        # Pass 3: Address Street & House Postcode & Component
+        astreet = str(get_val("address_street_key", "") or "")
+        apost = str(get_val("address_house_postcode_key", "") or "")
         acomp = str(get_val("address_component_key", "") or "")
-        candidates.update(self.retrieve_by_address_token(atk))
+        candidates.update(self.retrieve_by_address_street(astreet))
+        candidates.update(self.retrieve_by_address_house_postcode(apost))
         candidates.update(self.retrieve_by_address_component(acomp))
 
-        # Pass 5: Phonetic Soundex (expand if candidate volume allows)
+        # Pass 4: Significant Tokens & Name First Two Tokens
+        nsig = str(get_val("name_significant_token_key", "") or "")
+        ntwo = str(get_val("name_first_two_tokens", "") or "")
+        candidates.update(self.retrieve_by_significant_token(nsig))
+        if ntwo:
+            candidates.update(self.retrieve_by_name_first_two_tokens(ntwo))
+
+        # Pass 5: Address Token & Address House Geo (if candidate volume allows)
+        if len(candidates) < MAX_CANDIDATES_PER_S1:
+            atk = str(get_val("address_token_key", "") or "")
+            ahouse_geo = str(get_val("address_house_geo_key", "") or "")
+            candidates.update(self.retrieve_by_address_token(atk))
+            if ahouse_geo:
+                candidates.update(self.retrieve_by_address_house_geo(ahouse_geo))
+
+        # Pass 6: Phonetic Soundex (expand if candidate volume allows)
         if len(candidates) < MAX_CANDIDATES_PER_S1:
             nphon = str(get_val("name_phonetic_key", "") or "")
             phon_cands = self.retrieve_by_phonetic(nphon)
             candidates.update(phon_cands)
 
-        # Pass 6: Character 3-Gram Tolerant Retrieval
+        # Pass 7: Character 3-Gram Tolerant Retrieval
         if len(candidates) < MAX_CANDIDATES_PER_S1:
             ngram_cands = self.retrieve_by_char_ngrams(ncomp)
             candidates.update(ngram_cands)
@@ -518,8 +575,12 @@ class Indexes:
             "name_core_keys": len(self.name_core),
             "name_ascii_compact_keys": len(self.name_ascii_compact),
             "name_significant_token_key_keys": len(self.name_significant_token_key),
+            "name_first_two_tokens_keys": len(self.name_first_two_tokens),
             "address_token_key_keys": len(self.address_token_key),
             "address_component_key_keys": len(self.address_component_key),
+            "address_street_key_keys": len(self.address_street_key),
+            "address_house_geo_key_keys": len(self.address_house_geo_key),
+            "address_house_postcode_key_keys": len(self.address_house_postcode_key),
             "name_phonetic_key_keys": len(self.name_phonetic_key),
             "name_char_ngram_keys": len(self.name_char_ngram),
             "char_ngram_stats": self.char_ngram_stats,

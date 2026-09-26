@@ -464,3 +464,61 @@ class TestP3PairFeatures:
         assert mat.shape == (2, len(FEATURE_NAMES))
         assert mat[0, 2] == 1.0  # name_core_exact
         assert mat[1, 2] == 1.0  # name_core_exact
+
+    def test_discriminative_house_number_mismatch(self):
+        rec_same = {"address_house_number": "100", "address_street_key": "100_main_us"}
+        rec_diff = {"address_house_number": "200", "address_street_key": "200_main_us"}
+
+        feat_mismatch = compute_pair_feature_vector(rec_same, rec_diff, "S2-1")
+        idx_mismatch = FEATURE_NAMES.index("addr_house_num_mismatch")
+        idx_match = FEATURE_NAMES.index("addr_house_num_match")
+        assert feat_mismatch[idx_mismatch] == 1.0
+        assert feat_mismatch[idx_match] == 0.0
+
+        feat_match = compute_pair_feature_vector(rec_same, rec_same, "S2-2")
+        assert feat_match[idx_mismatch] == 0.0
+        assert feat_match[idx_match] == 1.0
+
+
+# =====================================================================
+# 8. ENHANCED ADDRESS & MULTILINGUAL NORMALIZATION TESTS
+# =====================================================================
+
+class TestEnhancedAddressKeys:
+    def test_street_key_extraction(self):
+        from business_entity_resolution.preprocessing import extract_address_components
+        res1 = extract_address_components("9308 Home Court, DES PLAINES CITY, IL", "us")
+        assert res1["house_number"] == "9308"
+        assert res1["street_root"] == "home"
+        assert res1["address_street_key"] == "9308_home_us"
+
+    def test_leading_zero_stripping(self):
+        from business_entity_resolution.preprocessing import extract_address_components
+        res = extract_address_components("004303 ELKINS AVE, NASHVILLE, TN", "us")
+        assert res["house_number"] == "4303"
+        assert res["street_root"] == "elkins"
+        assert res["address_street_key"] == "4303_elkins_us"
+
+    def test_complex_and_indic_address(self):
+        from business_entity_resolution.preprocessing import extract_address_components
+        res = extract_address_components("AF-0684, Uttar Pradesh, GHAZIABAD", "india")
+        assert res["house_number"] == "684"
+        assert res["geo_token"] == "up"
+
+
+class TestMultilingualAndPrefixCore:
+    def test_indic_transliteration(self):
+        from business_entity_resolution.preprocessing import normalize_business_name
+        norm = normalize_business_name("एसएस फूड प्राइवेट लिमिटेड")
+        assert "ss" in norm
+        assert "food" in norm
+        assert "private" in norm
+        assert "limited" in norm
+
+    def test_domain_and_prefix_removal(self):
+        assert extract_name_core("lovue.com") == "lovue"
+        assert extract_name_core("novent owl pllc") == "novent owl"
+        assert extract_name_core("pllc novent owl") == "novent owl"
+        assert extract_name_core("the acme corp") == "acme"
+        assert extract_name_core("smt great impex private limited") == "great impex"
+
