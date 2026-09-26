@@ -300,7 +300,8 @@ def train_p3_model(
     config: P3Config,
     max_train_records: int = 25000,
     max_s23_records: int = 300000,
-    val_ratio: float = 0.2
+    val_ratio: float = 0.2,
+    scale_pos_weight: Optional[float] = 1.0,
 ) -> Tuple[XGBClassifier, Dict[str, Any]]:
     """Train XGBoost matching model with genuine entity-level holdout evaluation."""
     print("=" * 80)
@@ -331,17 +332,17 @@ def train_p3_model(
     neg_count = len(train_labels) - pos_count
     pos_ratio = (pos_count / len(train_labels)) * 100
 
-    print("\nTraining Dataset Diagnostics:")
-    print(f"  Total train pairs:    {len(train_pairs):,}")
-    print(f"  Positive matches:     {pos_count:,} ({pos_ratio:.2f}%)")
-    print(f"  Negative pairs:       {neg_count:,} ({100 - pos_ratio:.2f}%)")
+    print("\nTraining Dataset Diagnostics:", flush=True)
+    print(f"  Total train pairs:    {len(train_pairs):,}", flush=True)
+    print(f"  Positive matches:     {pos_count:,} ({pos_ratio:.2f}%)", flush=True)
+    print(f"  Negative pairs:       {neg_count:,} ({100 - pos_ratio:.2f}%)", flush=True)
 
     # Feature extraction
-    print("\nExtracting pairwise features for training...")
+    print("\nExtracting pairwise features for training...", flush=True)
     X_train = build_feature_matrix([(p[0], p[1]) for p in train_pairs], recs_s1, recs_s23)
     y_train = np.array(train_labels, dtype=int)
 
-    print("Extracting pairwise features for holdout validation candidate pairs...")
+    print("Extracting pairwise features for holdout validation candidate pairs...", flush=True)
     X_val = build_feature_matrix(val_cand_pairs, recs_s1, recs_s23)
     
     # Ground truth labels for validation candidate pairs (for loss monitoring)
@@ -350,17 +351,19 @@ def train_p3_model(
         for s1_id, cand_id in val_cand_pairs
     ], dtype=int)
 
-    print(f"  Feature matrix shapes: X_train = {X_train.shape}, X_val = {X_val.shape}")
+    print(f"  Feature matrix shapes: X_train = {X_train.shape}, X_val = {X_val.shape}", flush=True)
 
-    # Calculate scale_pos_weight from training set
-    train_pos = max(1, pos_count)
-    scale_pos_weight = neg_count / train_pos
-    print(f"\nCalculated scale_pos_weight from training split: {scale_pos_weight:.2f}")
+    if scale_pos_weight is None or scale_pos_weight <= 0:
+        # Default unweighted
+        effective_spw = 1.0
+    else:
+        effective_spw = scale_pos_weight
+    print(f"\nUsing scale_pos_weight: {effective_spw:.2f}", flush=True)
 
     params = config.xgb_params.copy()
-    params["scale_pos_weight"] = scale_pos_weight
+    params["scale_pos_weight"] = effective_spw
 
-    print("\nTraining XGBoost Classifier...")
+    print("\nTraining XGBoost Classifier...", flush=True)
     model = XGBClassifier(**params)
     eval_set = [(X_train, y_train)]
     if len(X_val) > 0:
@@ -373,9 +376,9 @@ def train_p3_model(
     )
 
     # Validation Holdout Evaluation
-    print("\n" + "=" * 80)
-    print("GENUINE HOLDOUT VALIDATION EVALUATION (OFFICIAL MACRO F0.5)")
-    print("=" * 80)
+    print("\n" + "=" * 80, flush=True)
+    print("GENUINE HOLDOUT VALIDATION EVALUATION (OFFICIAL MACRO F0.5)", flush=True)
+    print("=" * 80, flush=True)
 
     # 1. Measure P2 Retrieval Ceiling on Holdout Split
     total_val_gt_links = sum(len(m) for m in val_ground_truth.values())
@@ -387,36 +390,50 @@ def train_p3_model(
     val_zero_candidates = sum(1 for s1 in val_ground_truth if len(val_candidates_by_s1.get(s1, set())) == 0)
 
     p2_recall = (recovered_val_links / total_val_gt_links) if total_val_gt_links > 0 else 1.0
-    print(f"Holdout S1 Entities:          {len(val_ground_truth):,}")
-    print(f"  - True singletons:          {val_singletons:,} ({val_singletons/len(val_ground_truth):.2%})")
-    print(f"  - Zero P2 candidates:       {val_zero_candidates:,} ({val_zero_candidates/len(val_ground_truth):.2%})")
-    print(f"  - Total true GT links:      {total_val_gt_links:,}")
-    print(f"  - P2 recovered GT links:    {recovered_val_links:,}")
-    print(f"  - P2 Candidate Recall:      {p2_recall:.4%}")
-    print("-" * 80)
+    print(f"Holdout S1 Entities:          {len(val_ground_truth):,}", flush=True)
+    print(f"  - True singletons:          {val_singletons:,} ({val_singletons/len(val_ground_truth):.2%})", flush=True)
+    print(f"  - Zero P2 candidates:       {val_zero_candidates:,} ({val_zero_candidates/len(val_ground_truth):.2%})", flush=True)
+    print(f"  - Total true GT links:      {total_val_gt_links:,}", flush=True)
+    print(f"  - P2 recovered GT links:    {recovered_val_links:,}", flush=True)
+    print(f"  - P2 Candidate Recall:      {p2_recall:.4%}", flush=True)
+    print("-" * 80, flush=True)
 
     val_probs = model.predict_proba(X_val)[:, 1] if len(X_val) > 0 else np.array([])
+    if len(val_probs) > 0:
+        med_prob = np.median(val_probs)
+        mean_prob = np.mean(val_probs)
+        print(f"Predicted Probability Distribution on Val Candidates:", flush=True)
+        print(f"  - Mean:   {mean_prob:.4f}", flush=True)
+        print(f"  - Median: {med_prob:.4f}", flush=True)
+        print(f"  - Min:    {np.min(val_probs):.4f}, Max: {np.max(val_probs):.4f}", flush=True)
+        print("-" * 80, flush=True)
 
     # Group candidate pair predictions
     scored_pairs = list(zip(val_cand_pairs, val_probs))
 
     from business_entity_resolution.p3_matching.evaluate import compute_entity_macro_f05, compute_f_beta
 
-    print(f"{'Threshold':>10} | {'Macro Precision':>16} | {'Macro Recall':>14} | {'Macro F0.5':>12} | {'Pred Matches':>14}")
-    print("-" * 80)
+    print(f"{'Threshold':>10} | {'Macro Precision':>16} | {'Macro Recall':>14} | {'Macro F0.5':>12} | {'True Pos':>10} | {'False Pos':>10}", flush=True)
+    print("-" * 90, flush=True)
 
     best_macro_f05 = -1.0
     best_thresh = 0.50
 
-    for thresh in np.arange(0.10, 0.95, 0.05):
+    for thresh in np.arange(0.10, 0.98, 0.05):
         thresh_val = float(round(thresh, 2))
         predictions: Dict[str, Set[str]] = {s1_id: set() for s1_id in val_ground_truth}
         pred_match_count = 0
+        tp_count = 0
+        fp_count = 0
 
         for (s1_id, cand_id), prob in scored_pairs:
             if prob >= thresh_val:
                 predictions[s1_id].add(cand_id)
                 pred_match_count += 1
+                if cand_id in val_ground_truth.get(s1_id, set()):
+                    tp_count += 1
+                else:
+                    fp_count += 1
 
         macro_p, macro_r, macro_f05 = compute_entity_macro_f05(val_ground_truth, predictions, beta=config.f_beta)
 
@@ -424,31 +441,62 @@ def train_p3_model(
             best_macro_f05 = macro_f05
             best_thresh = thresh_val
 
-        print(f"{thresh_val:>10.2f} | {macro_p:>16.4f} | {macro_r:>14.4f} | {macro_f05:>12.4f} | {pred_match_count:>14,}")
+        print(f"{thresh_val:>10.2f} | {macro_p:>16.4f} | {macro_r:>14.4f} | {macro_f05:>12.4f} | {tp_count:>10,} | {fp_count:>10,}", flush=True)
 
-    print("-" * 80)
-    print(f"Optimal Entity Macro F0.5 on Holdout: {best_thresh:.2f} (Macro F0.5 = {best_macro_f05:.4f})")
-    print("=" * 80)
+    print("-" * 90, flush=True)
+    print(f"Optimal Entity Macro F0.5 on Holdout: {best_thresh:.2f} (Macro F0.5 = {best_macro_f05:.4f})", flush=True)
+    print("=" * 80, flush=True)
 
     # Save model artifact
     config.model_dir.mkdir(parents=True, exist_ok=True)
     model_path = config.model_file
     model.save_model(str(model_path))
-    print(f"\nTrained model saved to: {model_path}")
+    print(f"\nTrained model saved to: {model_path}", flush=True)
+
+    # Save validation artifacts for P4 evaluation & threshold tuning
+    output_dir = Path("output")
+    output_dir.mkdir(parents=True, exist_ok=True)
+    
+    val_s1_list = sorted(list(val_ground_truth.keys()))
+    val_s1_path = output_dir / "val_s1_ids.json"
+    with open(val_s1_path, "w", encoding="utf-8") as f:
+        json.dump(val_s1_list, f, indent=2)
+    print(f"Saved {len(val_s1_list):,} validation S1 IDs to: {val_s1_path}", flush=True)
+
+    val_gt_serializable = {k: sorted(list(v)) for k, v in val_ground_truth.items()}
+    val_gt_path = output_dir / "val_ground_truth.json"
+    with open(val_gt_path, "w", encoding="utf-8") as f:
+        json.dump(val_gt_serializable, f, indent=2)
+    print(f"Saved validation ground truth to: {val_gt_path}", flush=True)
+
+    val_cands_path = output_dir / "val_candidate_pairs.tsv"
+    with open(val_cands_path, "w", encoding="utf-8") as f:
+        f.write("source1_entity_id\tcandidate_entity_ids\n")
+        for s1_id in val_s1_list:
+            cands = sorted(list(val_candidates_by_s1.get(s1_id, set())))
+            f.write(f"{s1_id}\t{','.join(cands)}\n")
+    print(f"Saved validation candidate pairs to: {val_cands_path}", flush=True)
+
+    val_scored_path = output_dir / "val_candidates_scored.tsv"
+    with open(val_scored_path, "w", encoding="utf-8") as f:
+        f.write("source1_entity_id\tcandidate_entity_id\tmatch_probability\n")
+        for (s1_id, cand_id), prob in scored_pairs:
+            f.write(f"{s1_id}\t{cand_id}\t{prob:.6f}\n")
+    print(f"Saved {len(scored_pairs):,} scored validation candidate pairs to: {val_scored_path}", flush=True)
 
     # Feature importances
     importances = model.feature_importances_
     sorted_idx = np.argsort(importances)[::-1]
-    print("\nTop 10 Important Features:")
-    for rank, idx in enumerate(sorted_idx[:10], 1):
-        print(f"  {rank:2d}. {FEATURE_NAMES[idx]:<30} {importances[idx]:.4f}")
+    print("\nTop 15 Important Features:", flush=True)
+    for rank, idx in enumerate(sorted_idx[:15], 1):
+        print(f"  {rank:2d}. {FEATURE_NAMES[idx]:<30} {importances[idx]:.4f}", flush=True)
 
     stats = {
         "train_samples": len(train_pairs),
         "val_entities": len(val_ground_truth),
         "val_candidate_pairs": len(val_cand_pairs),
         "p2_candidate_recall": float(p2_recall),
-        "scale_pos_weight": float(scale_pos_weight),
+        "scale_pos_weight": float(effective_spw),
         "best_thresh": float(best_thresh),
         "best_macro_f05": float(best_macro_f05)
     }
@@ -460,10 +508,17 @@ def main() -> int:
     parser.add_argument("--max-records", type=int, default=25000, help="Max S1 records for training pairs")
     parser.add_argument("--max-s23-records", type=int, default=300000, help="Max S2/S3 records to index (0 for all)")
     parser.add_argument("--val-ratio", type=float, default=0.2, help="Validation split ratio")
+    parser.add_argument("--scale-pos-weight", type=float, default=1.0, help="XGBoost scale_pos_weight (default 1.0 for true posterior probabilities)")
     args = parser.parse_args()
 
     config = P3Config()
-    train_p3_model(config, max_train_records=args.max_records, max_s23_records=args.max_s23_records, val_ratio=args.val_ratio)
+    train_p3_model(
+        config,
+        max_train_records=args.max_records,
+        max_s23_records=args.max_s23_records,
+        val_ratio=args.val_ratio,
+        scale_pos_weight=args.scale_pos_weight
+    )
     return 0
 
 

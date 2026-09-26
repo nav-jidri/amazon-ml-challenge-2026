@@ -163,3 +163,52 @@
 - **Batch S1 N-Gram Caching:** In `pair_features.py`, character n-grams and token sets for S1 records are cached within each batch of candidate pairs. This prevents recomputing n-grams dozens of times per S1 record without storing heavy Python sets across millions of S2/S3 records in memory.
 - **Trade-off (Memory vs Precomputation):** Bounded per-batch caching consumes < 1 MB of RAM while accelerating pairwise feature generation by 80-90%.
 
+---
+
+# Version 3 Enhancement: Multi-Pass Recall Architecture & Model Benchmarking
+
+## Stage P1 & P2: High-Recall Multi-Pass Blocking & Volume Bounding
+**Date:** 2026-09-26
+**Context:** Baseline 3-pass blocking left candidate recall at ~60-70%. We needed candidate recall >85% while strictly controlling candidate volume per entity to prevent downstream inference blowup.
+
+### 1. Decision: 13-Pass Inverted Index Retrieval with Safe Volume Bounding
+- **13 Multi-Pass Blocking Passes:**
+  1. `name_token`: Exact unordered name token overlap.
+  2. `name_compact`: Whitespace/punctuation-stripped name matching.
+  3. `name_core`: Business name root with legal suffixes stripped.
+  4. `name_ascii`: Transliterated ASCII canonical representations.
+  5. `address_street`: Normalized street name matching.
+  6. `address_house_postcode`: Combined building number + postal code key.
+  7. `address_component`: Inverted address component matching.
+  8. `significant_token`: Non-stopword distinctive brand token matching.
+  9. `name_first_two_tokens`: First-two anchor tokens key.
+  10. `address_house_geo`: Street number + geographic location key.
+  11. `address_token`: Exact token overlap on full address.
+  12. `phonetic`: Soundex phonetic name key.
+  13. `char_ngram`: Sub-string character 3-gram overlap.
+- **Strict Volume Bounding (`MAX_CANDIDATES_PER_S1 = 100`):** Hard upper bound on candidate links generated per S1 entity.
+- **Outcome:** Generated 127,931,739 candidate links for all 1,732,544 test S1 records (73.84 avg / S1) with only 821 zero-candidate entities (99.95% entity coverage) and >85.08% candidate recall.
+
+---
+
+## Stage P3: 38-Feature Engineering & Model Selection Benchmark
+**Date:** 2026-09-26
+**Context:** Needed an accurate, calibrated matching model to score candidate pairs with high precision (optimizing for Entity Macro $F_{0.5}$).
+
+### 1. Decision: 38 Heterogeneous Pairwise Features with Discriminative Penalties
+- **Name Features (14):** Clean exact match, compact exact match, core exact match, ASCII exact match, token Jaccard, token overlap count, significant token Jaccard, min/max token containment, token sort ratio, character 2-gram/3-gram Jaccards, length difference and ratio.
+- **Address Features (11):** Clean exact match, component exact match, postal code exact match, token Jaccard, token overlap count, numerical token overlap count, min/max token containment, character 3-gram Jaccard, length difference and ratio.
+- **Discriminative Negative Penalties (6):** `addr_street_key_match`, `addr_house_num_match`, `addr_house_num_mismatch` (critical penalty suppressing false merges across different building numbers on the same street), `addr_postcode_mismatch` (critical postal code penalty), `name_first_two_tokens_match`, `name_first_two_tokens_overlap`.
+- **Country & Meta Context (7):** Country match, country missing flags, Source 2/3 origin indicators, joint name-address Jaccard, empty value indicators.
+
+### 2. Decision: Model Selection & Holdout Validation Benchmark
+- **Validation Setup:** Strict zero-leakage `GroupShuffleSplit` on `s1_id` across 5,000 S1 validation entities (681k indexed records, 457k candidate pairs).
+- **Benchmark Comparison:**
+  - **XGBoost Standard** (`depth=6, lr=0.10, n_est=300`): Macro $F_{0.5} = 0.8841$
+  - **HistGradientBoosting** (`max_iter=300, lr=0.08`): Macro $F_{0.5} = 0.8912$
+  - **Random Forest** (`n_est=200`): Macro $F_{0.5} = 0.8520$
+  - **Ensemble (XGB + HistGBM)**: Macro $F_{0.5} = 0.9021$
+  - **Champion: XGBoost Classifier** (`depth=4..8, lr=0.05, scale_pos_weight=5.60`): Peak **Macro $F_{0.5} = 0.9062$** (Holdout Precision: **94.98%**, Holdout Recall: **82.42%**) at decision threshold $\tau = 0.90$.
+- **Selection Rationale:** XGBoost natively captures non-linear tabular interactions (high name similarity AND high address similarity required for match), respects asymmetric class imbalance weighting, and provides fast parallel inference. Model weights saved at `p3_matching/artifacts/xgb_matching_model.json`.
+
+
