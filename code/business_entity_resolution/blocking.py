@@ -43,76 +43,46 @@ from .preprocessing import (
 # ---------------------------------------------------------------------------
 
 CHAR_NGRAM_SIZE = 3
-
-# Minimum number of shared character n-grams required for a candidate.
-#
-# This is deliberately conservative for the first experiment.
-# We can tune this later based on recall and candidate-volume diagnostics.
 MIN_SHARED_CHAR_NGRAMS = 2
-
-# Do not use extremely common n-grams as retrieval keys.
-#
-# Example:
-#     "ing", "com", etc.
-#
-# can occur in a very large number of businesses and can create
-# pathological candidate sets.
 MAX_NGRAM_POSTINGS = 5000
+
+# Maximum postings allowed per blocking key to prevent explosive candidate sets
+MAX_KEY_POSTINGS = 2000
+
+# Maximum candidates per S1 entity to prevent unbounded memory usage
+MAX_CANDIDATES_PER_S1 = 100
 
 
 class Indexes:
     """
     Container for inverted indexes used by candidate generation.
 
-    Existing blocking indexes
-    --------------------------
-    name_token_key
-        Mapping name_token_key -> entity IDs.
-
-    name_compact
-        Mapping name_compact -> entity IDs.
-
-    name_core
-        Mapping name_core -> entity IDs.
-
-    address_token_key
-        Mapping address_token_key -> entity IDs.
-
-    name_phonetic_key
-        Mapping name_phonetic_key -> entity IDs.
-
-    New character n-gram index
-    --------------------------
-    name_char_ngram
-        Mapping character n-gram -> entity IDs.
-
-    Character n-gram retrieval is performed using multiple shared grams.
-    A candidate must share at least MIN_SHARED_CHAR_NGRAMS usable grams
-    with the Source 1 record.
-
-    Deduplication
-    -------------
-    Source 2 and Source 3 are deduplicated independently using:
-
-        (name_compact, address_clean, country_clean)
-
-    Rows where all three fields are empty are never deduplicated.
+    Blocking indexes:
+    -----------------
+    1. name_token_key: token-sorted name
+    2. name_compact: whitespace-stripped name
+    3. name_core: legal-suffix-stripped name
+    4. name_ascii_compact: diacritic-stripped compact name (e.g. cafe -> cafe)
+    5. name_significant_token_key: stopword-filtered core tokens
+    6. address_token_key: token-sorted address
+    7. address_component_key: house# + postal_code + country
+    8. name_phonetic_key: token-sorted Soundex
+    9. name_char_ngram: character 3-gram index with posting frequency filtering
     """
 
     def __init__(self) -> None:
-        # Existing indexes
         self.name_token_key: Dict[str, List[str]] = {}
         self.name_compact: Dict[str, List[str]] = {}
         self.name_core: Dict[str, List[str]] = {}
+        self.name_ascii_compact: Dict[str, List[str]] = {}
+        self.name_significant_token_key: Dict[str, List[str]] = {}
         self.address_token_key: Dict[str, List[str]] = {}
+        self.address_component_key: Dict[str, List[str]] = {}
         self.name_phonetic_key: Dict[str, List[str]] = {}
-
-        # New character n-gram index
         self.name_char_ngram: Dict[str, List[str]] = {}
 
         # Diagnostics
         self.dedup_stats: Dict[str, Dict[str, int]] = {}
-
         self.char_ngram_stats: Dict[str, int] = {
             "total_unique_ngrams_seen": 0,
             "indexed_ngrams": 0,
@@ -131,69 +101,52 @@ class Indexes:
         name_core: str = "",
         address_token_key: str = "",
         name_phonetic_key: str = "",
+        name_ascii_compact: str = "",
+        name_significant_token_key: str = "",
+        address_component_key: str = "",
     ) -> None:
-        """
-        Insert an entity into the existing exact/phonetic indexes.
-
-        Character n-gram indexing is handled separately because it requires
-        a corpus-level frequency-control step.
-        """
-
+        """Insert an entity into inverted indexes."""
         if name_token_key:
-            self.name_token_key.setdefault(
-                name_token_key, []
-            ).append(entity_id)
+            self.name_token_key.setdefault(name_token_key, []).append(entity_id)
 
         if name_compact:
-            self.name_compact.setdefault(
-                name_compact, []
-            ).append(entity_id)
+            self.name_compact.setdefault(name_compact, []).append(entity_id)
 
         if name_core:
-            self.name_core.setdefault(
-                name_core, []
-            ).append(entity_id)
+            self.name_core.setdefault(name_core, []).append(entity_id)
+
+        if name_ascii_compact:
+            self.name_ascii_compact.setdefault(name_ascii_compact, []).append(entity_id)
+
+        if name_significant_token_key:
+            self.name_significant_token_key.setdefault(name_significant_token_key, []).append(entity_id)
 
         if address_token_key:
-            self.address_token_key.setdefault(
-                address_token_key, []
-            ).append(entity_id)
+            self.address_token_key.setdefault(address_token_key, []).append(entity_id)
+
+        if address_component_key:
+            self.address_component_key.setdefault(address_component_key, []).append(entity_id)
 
         if name_phonetic_key:
-            self.name_phonetic_key.setdefault(
-                name_phonetic_key, []
-            ).append(entity_id)
+            self.name_phonetic_key.setdefault(name_phonetic_key, []).append(entity_id)
 
     def add(self, entity_id: str, row: Any) -> None:
-        """
-        Add a single pre-processed row to the indexes.
-
-        Kept for backward compatibility.
-        """
-
+        """Add a single pre-processed row to the indexes."""
         get_val = (
             row.get
             if hasattr(row, "get")
             else lambda k, d="": getattr(row, k, d)
         )
-
         self.add_record(
             entity_id=entity_id,
-            name_token_key=str(
-                get_val("name_token_key", "") or ""
-            ),
-            name_compact=str(
-                get_val("name_compact", "") or ""
-            ),
-            name_core=str(
-                get_val("name_core", "") or ""
-            ),
-            address_token_key=str(
-                get_val("address_token_key", "") or ""
-            ),
-            name_phonetic_key=str(
-                get_val("name_phonetic_key", "") or ""
-            ),
+            name_token_key=str(get_val("name_token_key", "") or ""),
+            name_compact=str(get_val("name_compact", "") or ""),
+            name_core=str(get_val("name_core", "") or ""),
+            address_token_key=str(get_val("address_token_key", "") or ""),
+            name_phonetic_key=str(get_val("name_phonetic_key", "") or ""),
+            name_ascii_compact=str(get_val("name_ascii_compact", "") or ""),
+            name_significant_token_key=str(get_val("name_significant_token_key", "") or ""),
+            address_component_key=str(get_val("address_component_key", "") or ""),
         )
 
     # ------------------------------------------------------------------
@@ -315,48 +268,16 @@ class Indexes:
 
                 # Fast column access instead of iterrows().
                 col_eid = chunk["entity_id"]
-
-                col_ntk = (
-                    chunk["name_token_key"]
-                    if "name_token_key" in chunk
-                    else [""] * len(chunk)
-                )
-
-                col_ncomp = (
-                    chunk["name_compact"]
-                    if "name_compact" in chunk
-                    else [""] * len(chunk)
-                )
-
-                col_ncore = (
-                    chunk["name_core"]
-                    if "name_core" in chunk
-                    else [""] * len(chunk)
-                )
-
-                col_atk = (
-                    chunk["address_token_key"]
-                    if "address_token_key" in chunk
-                    else [""] * len(chunk)
-                )
-
-                col_nphon = (
-                    chunk["name_phonetic_key"]
-                    if "name_phonetic_key" in chunk
-                    else [""] * len(chunk)
-                )
-
-                col_aclean = (
-                    chunk["address_clean"]
-                    if "address_clean" in chunk
-                    else [""] * len(chunk)
-                )
-
-                col_cclean = (
-                    chunk["country_clean"]
-                    if "country_clean" in chunk
-                    else [""] * len(chunk)
-                )
+                col_ntk = chunk["name_token_key"] if "name_token_key" in chunk else [""] * len(chunk)
+                col_ncomp = chunk["name_compact"] if "name_compact" in chunk else [""] * len(chunk)
+                col_ncore = chunk["name_core"] if "name_core" in chunk else [""] * len(chunk)
+                col_nascii = chunk["name_ascii_compact"] if "name_ascii_compact" in chunk else [""] * len(chunk)
+                col_nsig = chunk["name_significant_token_key"] if "name_significant_token_key" in chunk else [""] * len(chunk)
+                col_atk = chunk["address_token_key"] if "address_token_key" in chunk else [""] * len(chunk)
+                col_acomp = chunk["address_component_key"] if "address_component_key" in chunk else [""] * len(chunk)
+                col_nphon = chunk["name_phonetic_key"] if "name_phonetic_key" in chunk else [""] * len(chunk)
+                col_aclean = chunk["address_clean"] if "address_clean" in chunk else [""] * len(chunk)
+                col_cclean = chunk["country_clean"] if "country_clean" in chunk else [""] * len(chunk)
 
                 for (
                     eid,
@@ -365,6 +286,9 @@ class Indexes:
                     ncore,
                     atk,
                     nphon,
+                    nascii,
+                    nsig,
+                    acomp,
                     aclean,
                     cclean,
                 ) in zip(
@@ -374,6 +298,9 @@ class Indexes:
                     col_ncore,
                     col_atk,
                     col_nphon,
+                    col_nascii,
+                    col_nsig,
+                    col_acomp,
                     col_aclean,
                     col_cclean,
                 ):
@@ -412,54 +339,27 @@ class Indexes:
                     )
 
                     # --------------------------------------------------
-                    # Existing source-level deduplication
+                    # Source-level deduplication
                     # --------------------------------------------------
 
                     if k_comp or k_addr or k_ctry:
-
-                        dedup_key = (
-                            k_comp,
-                            k_addr,
-                            k_ctry,
-                        )
-
+                        dedup_key = (k_comp, k_addr, k_ctry)
                         if dedup_key in seen_dedup_keys:
                             duplicate_rows_dropped += 1
                             continue
-
                         seen_dedup_keys.add(dedup_key)
 
                     # --------------------------------------------------
-                    # Existing blocking indexes
+                    # Populate Inverted Indexes
                     # --------------------------------------------------
 
-                    ntk_str = (
-                        str(ntk).strip()
-                        if ntk is not None
-                        and not pd.isna(ntk)
-                        else ""
-                    )
-
-                    ncore_str = (
-                        str(ncore).strip()
-                        if ncore is not None
-                        and not pd.isna(ncore)
-                        else ""
-                    )
-
-                    atk_str = (
-                        str(atk).strip()
-                        if atk is not None
-                        and not pd.isna(atk)
-                        else ""
-                    )
-
-                    nphon_str = (
-                        str(nphon).strip()
-                        if nphon is not None
-                        and not pd.isna(nphon)
-                        else ""
-                    )
+                    ntk_str = str(ntk).strip() if ntk and not pd.isna(ntk) else ""
+                    ncore_str = str(ncore).strip() if ncore and not pd.isna(ncore) else ""
+                    atk_str = str(atk).strip() if atk and not pd.isna(atk) else ""
+                    nphon_str = str(nphon).strip() if nphon and not pd.isna(nphon) else ""
+                    nascii_str = str(nascii).strip() if nascii and not pd.isna(nascii) else ""
+                    nsig_str = str(nsig).strip() if nsig and not pd.isna(nsig) else ""
+                    acomp_str = str(acomp).strip() if acomp and not pd.isna(acomp) else ""
 
                     self.add_record(
                         entity_id=eid_str,
@@ -468,10 +368,13 @@ class Indexes:
                         name_core=ncore_str,
                         address_token_key=atk_str,
                         name_phonetic_key=nphon_str,
+                        name_ascii_compact=nascii_str,
+                        name_significant_token_key=nsig_str,
+                        address_component_key=acomp_str,
                     )
 
                     # --------------------------------------------------
-                    # New character n-gram blocking index
+                    # Character n-gram postings collection
                     # --------------------------------------------------
 
                     self._collect_char_ngram_postings(
@@ -485,111 +388,66 @@ class Indexes:
                 "duplicate_rows_dropped": duplicate_rows_dropped,
             }
 
-        # Finalize character n-gram index after both sources have
-        # contributed their postings.
-        self._finalize_char_ngram_index(
-            char_ngram_postings
-        )
+        # Finalize character n-gram index
+        self._finalize_char_ngram_index(char_ngram_postings)
 
     # ------------------------------------------------------------------
-    # Retrieval helpers
+    # Retrieval helpers (with frequency filtering)
     # ------------------------------------------------------------------
 
-    def retrieve_by_name_token(
-        self,
-        key: str,
-    ) -> Set[str]:
+    def _safe_retrieve(self, index: Dict[str, List[str]], key: str) -> Set[str]:
+        """Retrieve postings with frequency filtering to prevent explosive candidate sets."""
+        if not key:
+            return set()
+        postings = index.get(key)
+        if not postings:
+            return set()
+        if len(postings) > MAX_KEY_POSTINGS:
+            return set()
+        return set(postings)
 
-        return (
-            set(self.name_token_key.get(key, []))
-            if key
-            else set()
-        )
+    def retrieve_by_name_token(self, key: str) -> Set[str]:
+        return self._safe_retrieve(self.name_token_key, key)
 
-    def retrieve_by_name_compact(
-        self,
-        key: str,
-    ) -> Set[str]:
+    def retrieve_by_name_compact(self, key: str) -> Set[str]:
+        return self._safe_retrieve(self.name_compact, key)
 
-        return (
-            set(self.name_compact.get(key, []))
-            if key
-            else set()
-        )
+    def retrieve_by_name_core(self, key: str) -> Set[str]:
+        return self._safe_retrieve(self.name_core, key)
 
-    def retrieve_by_name_core(
-        self,
-        key: str,
-    ) -> Set[str]:
+    def retrieve_by_name_ascii_compact(self, key: str) -> Set[str]:
+        return self._safe_retrieve(self.name_ascii_compact, key)
 
-        return (
-            set(self.name_core.get(key, []))
-            if key
-            else set()
-        )
+    def retrieve_by_significant_token(self, key: str) -> Set[str]:
+        return self._safe_retrieve(self.name_significant_token_key, key)
 
-    def retrieve_by_address_token(
-        self,
-        key: str,
-    ) -> Set[str]:
+    def retrieve_by_address_token(self, key: str) -> Set[str]:
+        return self._safe_retrieve(self.address_token_key, key)
 
-        return (
-            set(self.address_token_key.get(key, []))
-            if key
-            else set()
-        )
+    def retrieve_by_address_component(self, key: str) -> Set[str]:
+        return self._safe_retrieve(self.address_component_key, key)
 
-    def retrieve_by_phonetic(
-        self,
-        key: str,
-    ) -> Set[str]:
-
-        return (
-            set(self.name_phonetic_key.get(key, []))
-            if key
-            else set()
-        )
+    def retrieve_by_phonetic(self, key: str) -> Set[str]:
+        return self._safe_retrieve(self.name_phonetic_key, key)
 
     def retrieve_by_char_ngrams(
         self,
         name_compact: str,
         min_shared_ngrams: int = MIN_SHARED_CHAR_NGRAMS,
     ) -> Set[str]:
-        """
-        Retrieve candidates using character n-gram overlap.
-
-        A candidate is returned only when it shares at least
-        `min_shared_ngrams` indexed character n-grams with the
-        Source 1 name.
-
-        The counting is performed per entity ID, so repeated grams
-        inside the same name do not artificially increase the score.
-        """
-
-        if not name_compact:
+        """Retrieve candidates using character n-gram overlap."""
+        if not name_compact or len(name_compact) < CHAR_NGRAM_SIZE:
             return set()
 
-        grams = set(
-            char_ngrams(
-                name_compact,
-                n=CHAR_NGRAM_SIZE,
-            )
-        )
-
+        grams = set(char_ngrams(name_compact, n=CHAR_NGRAM_SIZE))
         if not grams:
             return set()
 
         shared_counts: Dict[str, int] = defaultdict(int)
-
         for gram in grams:
-
-            postings = self.name_char_ngram.get(
-                gram
-            )
-
+            postings = self.name_char_ngram.get(gram)
             if not postings:
                 continue
-
             for entity_id in postings:
                 shared_counts[entity_id] += 1
 
@@ -603,24 +461,8 @@ class Indexes:
     # Complete candidate retrieval
     # ------------------------------------------------------------------
 
-    def retrieve_candidates_for_row(
-        self,
-        row: Any,
-    ) -> Set[str]:
-        """
-        Union all P2 blocking passes for one Source 1 row.
-
-        Existing passes:
-            - name_token_key
-            - name_compact
-            - name_core
-            - address_token_key
-            - name_phonetic_key
-
-        New pass:
-            - character n-gram blocking
-        """
-
+    def retrieve_candidates_for_row(self, row: Any) -> Set[str]:
+        """Union all P2 blocking passes for one Source 1 row with candidate bounding."""
         get_val = (
             row.get
             if hasattr(row, "get")
@@ -629,87 +471,38 @@ class Indexes:
 
         candidates: Set[str] = set()
 
-        # --------------------------------------------------------------
-        # Existing five passes
-        # --------------------------------------------------------------
+        # Pass 1: Exact Name Tokens & Compact
+        ntk = str(get_val("name_token_key", "") or "")
+        ncomp = str(get_val("name_compact", "") or "")
+        candidates.update(self.retrieve_by_name_token(ntk))
+        candidates.update(self.retrieve_by_name_compact(ncomp))
 
-        candidates.update(
-            self.retrieve_by_name_token(
-                str(
-                    get_val(
-                        "name_token_key",
-                        "",
-                    )
-                    or ""
-                )
-            )
-        )
+        # Pass 2: Name Core & ASCII Name
+        ncore = str(get_val("name_core", "") or "")
+        nascii = str(get_val("name_ascii_compact", "") or "")
+        candidates.update(self.retrieve_by_name_core(ncore))
+        candidates.update(self.retrieve_by_name_ascii_compact(nascii))
 
-        candidates.update(
-            self.retrieve_by_name_compact(
-                str(
-                    get_val(
-                        "name_compact",
-                        "",
-                    )
-                    or ""
-                )
-            )
-        )
+        # Pass 3: Significant Tokens
+        nsig = str(get_val("name_significant_token_key", "") or "")
+        candidates.update(self.retrieve_by_significant_token(nsig))
 
-        candidates.update(
-            self.retrieve_by_name_core(
-                str(
-                    get_val(
-                        "name_core",
-                        "",
-                    )
-                    or ""
-                )
-            )
-        )
+        # Pass 4: Address Token & Address Component Key
+        atk = str(get_val("address_token_key", "") or "")
+        acomp = str(get_val("address_component_key", "") or "")
+        candidates.update(self.retrieve_by_address_token(atk))
+        candidates.update(self.retrieve_by_address_component(acomp))
 
-        candidates.update(
-            self.retrieve_by_address_token(
-                str(
-                    get_val(
-                        "address_token_key",
-                        "",
-                    )
-                    or ""
-                )
-            )
-        )
+        # Pass 5: Phonetic Soundex (expand if candidate volume allows)
+        if len(candidates) < MAX_CANDIDATES_PER_S1:
+            nphon = str(get_val("name_phonetic_key", "") or "")
+            phon_cands = self.retrieve_by_phonetic(nphon)
+            candidates.update(phon_cands)
 
-        candidates.update(
-            self.retrieve_by_phonetic(
-                str(
-                    get_val(
-                        "name_phonetic_key",
-                        "",
-                    )
-                    or ""
-                )
-            )
-        )
-
-        # --------------------------------------------------------------
-        # New character n-gram pass
-        # --------------------------------------------------------------
-
-        name_compact = str(
-            get_val(
-                "name_compact",
-                "",
-            )
-            or ""
-        ).strip()
-
-        candidates.update(
-            self.retrieve_by_char_ngrams(
-                name_compact
-            )
-        )
+        # Pass 6: Character 3-Gram Tolerant Retrieval
+        if len(candidates) < MAX_CANDIDATES_PER_S1:
+            ngram_cands = self.retrieve_by_char_ngrams(ncomp)
+            candidates.update(ngram_cands)
 
         return candidates
 
@@ -718,30 +511,17 @@ class Indexes:
     # ------------------------------------------------------------------
 
     def stats(self) -> Dict[str, Any]:
-        """
-        Summary statistics for index sizes, deduplication and
-        character n-gram filtering.
-        """
-
+        """Summary statistics for index sizes, deduplication and character n-gram filtering."""
         return {
-            "name_token_key_keys": len(
-                self.name_token_key
-            ),
-            "name_compact_keys": len(
-                self.name_compact
-            ),
-            "name_core_keys": len(
-                self.name_core
-            ),
-            "address_token_key_keys": len(
-                self.address_token_key
-            ),
-            "name_phonetic_key_keys": len(
-                self.name_phonetic_key
-            ),
-            "name_char_ngram_keys": len(
-                self.name_char_ngram
-            ),
+            "name_token_key_keys": len(self.name_token_key),
+            "name_compact_keys": len(self.name_compact),
+            "name_core_keys": len(self.name_core),
+            "name_ascii_compact_keys": len(self.name_ascii_compact),
+            "name_significant_token_key_keys": len(self.name_significant_token_key),
+            "address_token_key_keys": len(self.address_token_key),
+            "address_component_key_keys": len(self.address_component_key),
+            "name_phonetic_key_keys": len(self.name_phonetic_key),
+            "name_char_ngram_keys": len(self.name_char_ngram),
             "char_ngram_stats": self.char_ngram_stats,
             "dedup_stats": self.dedup_stats,
         }
@@ -751,17 +531,12 @@ def build_candidate_indexes(
     source2_path: Path,
     source3_path: Path,
 ) -> Indexes:
-    """
-    Convenience wrapper that builds indexes from Source 2 and Source 3.
-    """
-
-    idx = Indexes()
-
-    idx.build_from_paths(
+    """Build Indexes from preprocessed Source 2 and Source 3 files."""
+    indexes = Indexes()
+    indexes.build_from_paths(
         [
             source2_path,
             source3_path,
         ]
     )
-
-    return idx
+    return indexes

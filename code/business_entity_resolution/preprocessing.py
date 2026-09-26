@@ -431,6 +431,44 @@ def multi_char_ngrams(
 
 
 # ============================================================
+# DIACRITIC / ACCENT NORMALIZATION & SIGNIFICANT TOKENS
+# ============================================================
+
+GENERIC_BUSINESS_STOPWORDS = {
+    "the", "and", "of", "for", "in", "at", "by", "with", "&",
+    "group", "services", "service", "international", "global",
+    "solutions", "solution", "holdings", "holding", "enterprises",
+    "enterprise", "industries", "industry", "management", "consulting",
+    "consultants", "tech", "technology", "technologies", "trading",
+    "commercial", "logistics", "associates", "partners", "products",
+    "systems", "worldwide", "corporation", "company", "limited"
+}
+
+
+def strip_accents_ascii(value: str) -> str:
+    """Normalize text to ASCII by removing accents and combining diacritical marks.
+
+    Example:
+        'café müller société' -> 'cafe muller societe'
+    """
+    if not value:
+        return ""
+    nfkd = unicodedata.normalize("NFKD", str(value))
+    ascii_chars = [c for c in nfkd if not unicodedata.combining(c)]
+    return "".join(ascii_chars).encode("ascii", "ignore").decode("ascii")
+
+
+def significant_token_key(value: str) -> str:
+    """Extract sorted non-stopword tokens for robust semantic token blocking."""
+    if not value:
+        return ""
+    tokens = [t for t in value.split() if t not in GENERIC_BUSINESS_STOPWORDS and len(t) > 1]
+    if not tokens:
+        tokens = value.split()
+    return " ".join(sorted(tokens))
+
+
+# ============================================================
 # ADDRESS
 # ============================================================
 
@@ -439,54 +477,51 @@ def normalize_address(value) -> str:
     return normalize_text(value)
 
 
-def extract_address_components(address_clean: str) -> dict[str, str]:
+def extract_address_components(address_clean: str, country_clean: str = "") -> dict[str, str]:
     """
     Extract lightweight deterministic address components.
-
-    This is deliberately conservative.
-
-    It does NOT attempt full postal-address parsing.
 
     Returned fields:
         house_number
         postal_code
-
-    More sophisticated address retrieval belongs in P2 and
-    pairwise address comparison belongs in P3.
+        address_component_key (composite key of house# + postal + country)
     """
     if not address_clean:
         return {
             "house_number": "",
             "postal_code": "",
+            "address_component_key": "",
         }
 
     tokens = address_clean.split()
-
     house_number = ""
 
-    # Capture a leading numeric/address token.
+    # Capture a leading numeric/address token
     for token in tokens:
         if re.match(r"^\d+[a-z]?$", token):
             house_number = token
             break
-
-        # Handle common forms such as 12-14 or 12/14.
         if re.match(r"^\d+[-/]\d+[a-z]?$", token):
             house_number = token
             break
 
-    # Generic postal-code extraction.
-    # This intentionally does not assume a single country's format.
+    # Generic postal-code extraction (5-6 digits or alphanumeric postal patterns)
     postal_code = ""
-
     for token in tokens:
         if re.fullmatch(r"\d{5,6}", token):
             postal_code = token
             break
 
+    component_key = ""
+    if house_number and postal_code:
+        component_key = f"{house_number}_{postal_code}_{country_clean}".strip("_")
+    elif postal_code and country_clean:
+        component_key = f"post_{postal_code}_{country_clean}"
+
     return {
         "house_number": house_number,
         "postal_code": postal_code,
+        "address_component_key": component_key,
     }
 
 
@@ -496,57 +531,59 @@ def extract_address_components(address_clean: str) -> dict[str, str]:
 
 COUNTRY_ALIASES = {
     # United States
-    "us": "us",
-    "usa": "us",
-    "united states": "us",
-    "united states of america": "us",
-
+    "us": "us", "usa": "us", "united states": "us", "united states of america": "us",
     # India
-    "in": "india",
-    "ind": "india",
-    "india": "india",
-    "republic of india": "india",
-
+    "in": "india", "ind": "india", "india": "india", "republic of india": "india",
     # France
-    "fr": "france",
-    "fra": "france",
-    "france": "france",
-    "french republic": "france",
-
+    "fr": "france", "fra": "france", "france": "france", "french republic": "france",
     # United Kingdom
-    "uk": "uk",
-    "united kingdom": "uk",
-    "gb": "uk",
-    "gbr": "uk",
-    "great britain": "uk",
-
+    "uk": "uk", "united kingdom": "uk", "gb": "uk", "gbr": "uk", "great britain": "uk",
     # Germany
-    "de": "germany",
-    "deu": "germany",
-    "germany": "germany",
-    "deutschland": "germany",
-
+    "de": "germany", "deu": "germany", "germany": "germany", "deutschland": "germany",
     # Canada
-    "ca": "canada",
-    "can": "canada",
-    "canada": "canada",
-
+    "ca": "canada", "can": "canada", "canada": "canada",
     # Australia
-    "au": "australia",
-    "aus": "australia",
-    "australia": "australia",
-
+    "au": "australia", "aus": "australia", "australia": "australia",
     # China
-    "cn": "china",
-    "chn": "china",
-    "china": "china",
-    "prc": "china",
-    "peoples republic of china": "china",
-
+    "cn": "china", "chn": "china", "china": "china", "prc": "china", "peoples republic of china": "china",
     # Japan
-    "jp": "japan",
-    "jpn": "japan",
-    "japan": "japan",
+    "jp": "japan", "jpn": "japan", "japan": "japan",
+    # Brazil
+    "br": "brazil", "bra": "brazil", "brazil": "brazil", "brasil": "brazil",
+    # Italy
+    "it": "italy", "ita": "italy", "italy": "italy", "italia": "italy",
+    # Spain
+    "es": "spain", "esp": "spain", "spain": "spain", "espana": "spain",
+    # Mexico
+    "mx": "mexico", "mex": "mexico", "mexico": "mexico",
+    # Netherlands
+    "nl": "netherlands", "nld": "netherlands", "netherlands": "netherlands", "holland": "netherlands",
+    # Singapore
+    "sg": "singapore", "sgp": "singapore", "singapore": "singapore",
+    # Switzerland
+    "ch": "switzerland", "che": "switzerland", "switzerland": "switzerland", "suisse": "switzerland", "schweiz": "switzerland",
+    # Sweden
+    "se": "sweden", "swe": "sweden", "sweden": "sweden", "sverige": "sweden",
+    # Russia
+    "ru": "russia", "rus": "russia", "russia": "russia", "russian federation": "russia",
+    # South Africa
+    "za": "south africa", "zaf": "south africa", "south africa": "south africa",
+    # UAE
+    "ae": "uae", "are": "uae", "uae": "uae", "united arab emirates": "uae",
+    # Poland
+    "pl": "poland", "pol": "poland", "poland": "poland", "polska": "poland",
+    # Belgium
+    "be": "belgium", "bel": "belgium", "belgium": "belgium", "belgique": "belgiu",
+    # Austria
+    "at": "austria", "aut": "austria", "austria": "austria", "osterreich": "austria",
+    # Ireland
+    "ie": "ireland", "irl": "ireland", "ireland": "ireland",
+    # New Zealand
+    "nz": "new zealand", "nzl": "new zealand", "new zealand": "new zealand",
+    # South Korea
+    "kr": "south korea", "kor": "south korea", "south korea": "south korea", "korea": "south korea",
+    # Turkey
+    "tr": "turkey", "tur": "turkey", "turkey": "turkey", "turkiye": "turkey",
 }
 
 
@@ -665,6 +702,21 @@ def preprocess_dataframe(df: pd.DataFrame) -> pd.DataFrame:
         .map(compute_phonetic_key)
     )
 
+    df["name_ascii"] = (
+        df["name_clean"]
+        .map(strip_accents_ascii)
+    )
+
+    df["name_ascii_compact"] = (
+        df["name_ascii"]
+        .map(compact_text)
+    )
+
+    df["name_significant_token_key"] = (
+        df["name_core"]
+        .map(significant_token_key)
+    )
+
     # --------------------------------------------------------
     # Business-name statistics useful for P2/P3
     # --------------------------------------------------------
@@ -677,6 +729,15 @@ def preprocess_dataframe(df: pd.DataFrame) -> pd.DataFrame:
     df["name_core_token_count"] = (
         df["name_core"]
         .map(lambda value: len(value.split()) if value else 0)
+    )
+
+    # --------------------------------------------------------
+    # Country (normalized early for address components)
+    # --------------------------------------------------------
+
+    df["country_clean"] = (
+        df["country"]
+        .map(normalize_country)
     )
 
     # --------------------------------------------------------
@@ -699,27 +760,14 @@ def preprocess_dataframe(df: pd.DataFrame) -> pd.DataFrame:
     )
 
     # Lightweight structured address features.
-    address_components = (
-        df["address_clean"]
-        .map(extract_address_components)
-    )
+    address_components = [
+        extract_address_components(addr, ctry)
+        for addr, ctry in zip(df["address_clean"], df["country_clean"])
+    ]
 
-    df["address_house_number"] = address_components.map(
-        lambda item: item["house_number"]
-    )
-
-    df["address_postal_code"] = address_components.map(
-        lambda item: item["postal_code"]
-    )
-
-    # --------------------------------------------------------
-    # Country
-    # --------------------------------------------------------
-
-    df["country_clean"] = (
-        df["country"]
-        .map(normalize_country)
-    )
+    df["address_house_number"] = [item["house_number"] for item in address_components]
+    df["address_postal_code"] = [item["postal_code"] for item in address_components]
+    df["address_component_key"] = [item["address_component_key"] for item in address_components]
 
     # --------------------------------------------------------
     # Derived missing flags

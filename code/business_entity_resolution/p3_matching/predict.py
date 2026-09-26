@@ -42,14 +42,23 @@ def load_normalized_records(
         print(f"  Streaming {path.name}...")
         for chunk in iter_preprocessed_file(path, chunksize=chunksize):
             col_core = chunk["name_core"] if "name_core" in chunk else [""] * len(chunk)
-            for eid, nclean, ncomp, ncore, ntk, aclean, atk, cclean in zip(
+            col_nascii = chunk["name_ascii_compact"] if "name_ascii_compact" in chunk else [""] * len(chunk)
+            col_nsig = chunk["name_significant_token_key"] if "name_significant_token_key" in chunk else [""] * len(chunk)
+            col_acomp = chunk["address_component_key"] if "address_component_key" in chunk else [""] * len(chunk)
+            col_post = chunk["address_postal_code"] if "address_postal_code" in chunk else [""] * len(chunk)
+
+            for eid, nclean, ncomp, ncore, nascii, nsig, ntk, aclean, atk, acomp, post, cclean in zip(
                 chunk["entity_id"],
                 chunk["name_clean"],
                 chunk["name_compact"],
                 col_core,
+                col_nascii,
+                col_nsig,
                 chunk["name_token_key"],
                 chunk["address_clean"],
                 chunk["address_token_key"],
+                col_acomp,
+                col_post,
                 chunk["country_clean"]
             ):
                 eid_str = str(eid).strip()
@@ -58,9 +67,13 @@ def load_normalized_records(
                         "name_clean": nclean,
                         "name_compact": ncomp,
                         "name_core": ncore,
+                        "name_ascii_compact": nascii,
+                        "name_significant_token_key": nsig,
                         "name_token_key": ntk,
                         "address_clean": aclean,
                         "address_token_key": atk,
+                        "address_component_key": acomp,
+                        "address_postal_code": post,
                         "country_clean": cclean,
                     }
 
@@ -70,14 +83,23 @@ def load_normalized_records(
     print(f"  Streaming {source1_path.name}...")
     for chunk in iter_preprocessed_file(source1_path, chunksize=chunksize):
         col_core = chunk["name_core"] if "name_core" in chunk else [""] * len(chunk)
-        for eid, nclean, ncomp, ncore, ntk, aclean, atk, cclean in zip(
+        col_nascii = chunk["name_ascii_compact"] if "name_ascii_compact" in chunk else [""] * len(chunk)
+        col_nsig = chunk["name_significant_token_key"] if "name_significant_token_key" in chunk else [""] * len(chunk)
+        col_acomp = chunk["address_component_key"] if "address_component_key" in chunk else [""] * len(chunk)
+        col_post = chunk["address_postal_code"] if "address_postal_code" in chunk else [""] * len(chunk)
+
+        for eid, nclean, ncomp, ncore, nascii, nsig, ntk, aclean, atk, acomp, post, cclean in zip(
             chunk["entity_id"],
             chunk["name_clean"],
             chunk["name_compact"],
             col_core,
+            col_nascii,
+            col_nsig,
             chunk["name_token_key"],
             chunk["address_clean"],
             chunk["address_token_key"],
+            col_acomp,
+            col_post,
             chunk["country_clean"]
         ):
             eid_str = str(eid).strip()
@@ -86,9 +108,13 @@ def load_normalized_records(
                     "name_clean": nclean,
                     "name_compact": ncomp,
                     "name_core": ncore,
+                    "name_ascii_compact": nascii,
+                    "name_significant_token_key": nsig,
                     "name_token_key": ntk,
                     "address_clean": aclean,
                     "address_token_key": atk,
+                    "address_component_key": acomp,
+                    "address_postal_code": post,
                     "country_clean": cclean,
                 }
 

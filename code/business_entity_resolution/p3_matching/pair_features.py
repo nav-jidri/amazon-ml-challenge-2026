@@ -18,8 +18,10 @@ FEATURE_NAMES = [
     "name_exact_clean",              # Exact equality of name_clean
     "name_exact_compact",            # Exact equality of name_compact
     "name_core_exact",               # Exact equality of name_core (legal suffix normalized)
+    "name_ascii_exact",              # Exact equality of diacritic-stripped name_ascii_compact
     "name_token_jaccard",            # Jaccard similarity of name token sets
     "name_token_overlap_count",      # Count of shared name tokens
+    "name_sig_token_jaccard",        # Jaccard similarity of non-stopword significant tokens
     "name_token_containment_min",    # min(|A cap B| / |A|, |A cap B| / |B|)
     "name_token_containment_max",    # max(|A cap B| / |A|, |A cap B| / |B|)
     "name_token_sort_ratio",         # Character-level similarity on name_token_key
@@ -33,6 +35,8 @@ FEATURE_NAMES = [
     "addr_token_jaccard",            # Jaccard similarity of address token sets
     "addr_token_overlap_count",      # Count of shared address tokens
     "addr_num_overlap_count",        # Count of shared numeric tokens (house/PIN/zip)
+    "addr_comp_exact",               # Exact match on address_component_key (house# + postal)
+    "addr_postcode_exact",           # Exact match on postal_code
     "addr_token_containment_min",    # min(|A cap B| / |A|, |A cap B| / |B|)
     "addr_token_containment_max",    # max(|A cap B| / |A|, |A cap B| / |B|)
     "addr_char_3gram_jaccard",       # Character 3-gram Jaccard on address_clean
@@ -103,19 +107,7 @@ def compute_pair_feature_vector(
     b_entity_id: str = "",
     precomputed_a: Optional[Dict[str, Any]] = None,
 ) -> List[float]:
-    """Compute pairwise feature vector for two preprocessed records.
-
-    Parameters
-    ----------
-    rec_a : dict
-        P1 preprocessed fields for record A (Source 1)
-    rec_b : dict
-        P1 preprocessed fields for record B (Source 2 or 3)
-    b_entity_id : str
-        Identifier for record B (to determine S2 vs S3 indicator)
-    precomputed_a : dict, optional
-        Precomputed tokens, n-grams, and lengths for record A to avoid redundant work.
-    """
+    """Compute pairwise feature vector for two preprocessed records."""
     # Names
     name_a = precomputed_a["name_a"] if precomputed_a else _safe_str(rec_a.get("name_clean", ""))
     name_b = _safe_str(rec_b.get("name_clean", ""))
@@ -123,17 +115,25 @@ def compute_pair_feature_vector(
     compact_b = _safe_str(rec_b.get("name_compact", ""))
     core_a = _safe_str(rec_a.get("name_core", ""))
     core_b = _safe_str(rec_b.get("name_core", ""))
+    ascii_a = _safe_str(rec_a.get("name_ascii_compact", ""))
+    ascii_b = _safe_str(rec_b.get("name_ascii_compact", ""))
+    sig_a = _safe_str(rec_a.get("name_significant_token_key", ""))
+    sig_b = _safe_str(rec_b.get("name_significant_token_key", ""))
     tkey_a = _safe_str(rec_a.get("name_token_key", ""))
     tkey_b = _safe_str(rec_b.get("name_token_key", ""))
 
     tokens_a = precomputed_a["tokens_a"] if precomputed_a else set(name_a.split())
     tokens_b = set(name_b.split())
+    sig_toks_a = set(sig_a.split()) if sig_a else set()
+    sig_toks_b = set(sig_b.split()) if sig_b else set()
 
     name_exact_clean = 1.0 if (name_a and name_a == name_b) else 0.0
     name_exact_compact = 1.0 if (compact_a and compact_a == compact_b) else 0.0
     name_core_exact = 1.0 if (core_a and core_a == core_b) else 0.0
+    name_ascii_exact = 1.0 if (ascii_a and ascii_a == ascii_b) else 0.0
     name_token_jaccard = _jaccard_similarity(tokens_a, tokens_b)
     name_token_overlap_count = float(len(tokens_a & tokens_b))
+    name_sig_token_jaccard = _jaccard_similarity(sig_toks_a, sig_toks_b)
     name_cont_min, name_cont_max = _containment(tokens_a, tokens_b)
     name_token_sort_ratio = _char_similarity(tkey_a, tkey_b)
 
@@ -155,10 +155,16 @@ def compute_pair_feature_vector(
     addr_b = _safe_str(rec_b.get("address_clean", ""))
     addr_toks_a = precomputed_a["addr_toks_a"] if precomputed_a else set(addr_a.split())
     addr_toks_b = set(addr_b.split())
+    acomp_a = _safe_str(rec_a.get("address_component_key", ""))
+    acomp_b = _safe_str(rec_b.get("address_component_key", ""))
+    post_a = _safe_str(rec_a.get("address_postal_code", ""))
+    post_b = _safe_str(rec_b.get("address_postal_code", ""))
 
     addr_exact_clean = 1.0 if (addr_a and addr_a == addr_b) else 0.0
     addr_token_jaccard = _jaccard_similarity(addr_toks_a, addr_toks_b)
     addr_token_overlap_count = float(len(addr_toks_a & addr_toks_b))
+    addr_comp_exact = 1.0 if (acomp_a and acomp_a == acomp_b) else 0.0
+    addr_postcode_exact = 1.0 if (post_a and post_a == post_b) else 0.0
 
     nums_a = precomputed_a["nums_a"] if precomputed_a else {t for t in addr_toks_a if re.match(r"^\d+$", t)}
     nums_b = {t for t in addr_toks_b if re.match(r"^\d+$", t)}
@@ -193,8 +199,10 @@ def compute_pair_feature_vector(
         name_exact_clean,
         name_exact_compact,
         name_core_exact,
+        name_ascii_exact,
         name_token_jaccard,
         name_token_overlap_count,
+        name_sig_token_jaccard,
         name_cont_min,
         name_cont_max,
         name_token_sort_ratio,
@@ -206,6 +214,8 @@ def compute_pair_feature_vector(
         addr_token_jaccard,
         addr_token_overlap_count,
         addr_num_overlap_count,
+        addr_comp_exact,
+        addr_postcode_exact,
         addr_cont_min,
         addr_cont_max,
         addr_char_3gram_jaccard,

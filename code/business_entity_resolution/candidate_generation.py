@@ -183,36 +183,14 @@ def generate_candidate_pairs(
 
             # Fast column access.
             col_eid = chunk["entity_id"]
-
-            col_ntk = (
-                chunk["name_token_key"]
-                if "name_token_key" in chunk
-                else [""] * len(chunk)
-            )
-
-            col_ncomp = (
-                chunk["name_compact"]
-                if "name_compact" in chunk
-                else [""] * len(chunk)
-            )
-
-            col_ncore = (
-                chunk["name_core"]
-                if "name_core" in chunk
-                else [""] * len(chunk)
-            )
-
-            col_atk = (
-                chunk["address_token_key"]
-                if "address_token_key" in chunk
-                else [""] * len(chunk)
-            )
-
-            col_nphon = (
-                chunk["name_phonetic_key"]
-                if "name_phonetic_key" in chunk
-                else [""] * len(chunk)
-            )
+            col_ntk = chunk["name_token_key"] if "name_token_key" in chunk else [""] * len(chunk)
+            col_ncomp = chunk["name_compact"] if "name_compact" in chunk else [""] * len(chunk)
+            col_ncore = chunk["name_core"] if "name_core" in chunk else [""] * len(chunk)
+            col_nascii = chunk["name_ascii_compact"] if "name_ascii_compact" in chunk else [""] * len(chunk)
+            col_nsig = chunk["name_significant_token_key"] if "name_significant_token_key" in chunk else [""] * len(chunk)
+            col_atk = chunk["address_token_key"] if "address_token_key" in chunk else [""] * len(chunk)
+            col_acomp = chunk["address_component_key"] if "address_component_key" in chunk else [""] * len(chunk)
+            col_nphon = chunk["name_phonetic_key"] if "name_phonetic_key" in chunk else [""] * len(chunk)
 
             for (
                 eid,
@@ -221,6 +199,9 @@ def generate_candidate_pairs(
                 ncore,
                 atk,
                 nphon,
+                nascii,
+                nsig,
+                acomp,
             ) in zip(
                 col_eid,
                 col_ntk,
@@ -228,6 +209,9 @@ def generate_candidate_pairs(
                 col_ncore,
                 col_atk,
                 col_nphon,
+                col_nascii,
+                col_nsig,
+                col_acomp,
             ):
 
                 s1_id = (
@@ -242,177 +226,71 @@ def generate_candidate_pairs(
 
                 total_s1_rows += 1
 
-                # ------------------------------------------------------
-                # Normalize values coming from the preprocessing layer.
-                # ------------------------------------------------------
-
-                ntk_str = (
-                    str(ntk).strip()
-                    if ntk is not None
-                    and not pd.isna(ntk)
-                    else ""
-                )
-
-                ncomp_str = (
-                    str(ncomp).strip()
-                    if ncomp is not None
-                    and not pd.isna(ncomp)
-                    else ""
-                )
-
-                ncore_str = (
-                    str(ncore).strip()
-                    if ncore is not None
-                    and not pd.isna(ncore)
-                    else ""
-                )
-
-                atk_str = (
-                    str(atk).strip()
-                    if atk is not None
-                    and not pd.isna(atk)
-                    else ""
-                )
-
-                nphon_str = (
-                    str(nphon).strip()
-                    if nphon is not None
-                    and not pd.isna(nphon)
-                    else ""
-                )
+                ntk_str = str(ntk).strip() if ntk and not pd.isna(ntk) else ""
+                ncomp_str = str(ncomp).strip() if ncomp and not pd.isna(ncomp) else ""
+                ncore_str = str(ncore).strip() if ncore and not pd.isna(ncore) else ""
+                atk_str = str(atk).strip() if atk and not pd.isna(atk) else ""
+                nphon_str = str(nphon).strip() if nphon and not pd.isna(nphon) else ""
+                nascii_str = str(nascii).strip() if nascii and not pd.isna(nascii) else ""
+                nsig_str = str(nsig).strip() if nsig and not pd.isna(nsig) else ""
+                acomp_str = str(acomp).strip() if acomp and not pd.isna(acomp) else ""
 
                 # ------------------------------------------------------
-                # Individual blocking passes
+                # Multi-Pass Candidate Retrieval
                 # ------------------------------------------------------
 
-                c_tok = indexes.retrieve_by_name_token(
-                    ntk_str
-                )
-
-                c_comp = indexes.retrieve_by_name_compact(
-                    ncomp_str
-                )
-
-                c_core = indexes.retrieve_by_name_core(
-                    ncore_str
-                )
-
-                c_addr = indexes.retrieve_by_address_token(
-                    atk_str
-                )
-
-                c_phon = indexes.retrieve_by_phonetic(
-                    nphon_str
-                )
-
-                c_char = indexes.retrieve_by_char_ngrams(
-                    ncomp_str
-                )
+                c_tok = indexes.retrieve_by_name_token(ntk_str) - {s1_id}
+                c_comp = indexes.retrieve_by_name_compact(ncomp_str) - {s1_id}
+                c_core = indexes.retrieve_by_name_core(ncore_str) - {s1_id}
+                c_ascii = indexes.retrieve_by_name_ascii_compact(nascii_str) - {s1_id}
+                c_sig = indexes.retrieve_by_significant_token(nsig_str) - {s1_id}
+                c_addr = indexes.retrieve_by_address_token(atk_str) - {s1_id}
+                c_acomp = indexes.retrieve_by_address_component(acomp_str) - {s1_id}
+                c_phon = indexes.retrieve_by_phonetic(nphon_str) - {s1_id}
+                c_char = indexes.retrieve_by_char_ngrams(ncomp_str) - {s1_id}
 
                 # ------------------------------------------------------
-                # Remove self-match from individual diagnostics.
-                # ------------------------------------------------------
-
-                c_tok_clean = c_tok - {s1_id}
-                c_comp_clean = c_comp - {s1_id}
-                c_core_clean = c_core - {s1_id}
-                c_addr_clean = c_addr - {s1_id}
-                c_phon_clean = c_phon - {s1_id}
-                c_char_clean = c_char - {s1_id}
-
-                # ------------------------------------------------------
-                # Individual method diagnostics
-                # ------------------------------------------------------
-
-                method_sets = {
-                    "name_token": c_tok_clean,
-                    "name_compact": c_comp_clean,
-                    "name_core": c_core_clean,
-                    "address_token": c_addr_clean,
-                    "phonetic": c_phon_clean,
-                    "char_ngram": c_char_clean,
-                }
-
-                for method_name, method_candidates in method_sets.items():
-
-                    method_candidate_counts[
-                        method_name
-                    ] += len(method_candidates)
-
-                    if method_candidates:
-                        method_s1_hits[
-                            method_name
-                        ] += 1
-
-                # ------------------------------------------------------
-                # Incremental union diagnostics
-                #
-                # The order is deliberately fixed so we can measure the
-                # additional value of each blocking pass.
+                # Incremental Union with Volume Bounding
                 # ------------------------------------------------------
 
                 cumulative_candidates: Set[str] = set()
 
                 ordered_methods = [
-                    ("name_token", c_tok_clean),
-                    ("name_compact", c_comp_clean),
-                    ("name_core", c_core_clean),
-                    ("address_token", c_addr_clean),
-                    ("phonetic", c_phon_clean),
-                    ("char_ngram", c_char_clean),
+                    ("name_token", c_tok),
+                    ("name_compact", c_comp),
+                    ("name_core", c_core),
+                    ("name_ascii", c_ascii),
+                    ("significant_token", c_sig),
+                    ("address_token", c_addr),
+                    ("address_component", c_acomp),
+                    ("phonetic", c_phon),
+                    ("char_ngram", c_char),
                 ]
 
                 for method_name, method_candidates in ordered_methods:
-
-                    new_candidates = (
-                        method_candidates
-                        - cumulative_candidates
-                    )
-
+                    new_candidates = method_candidates - cumulative_candidates
                     if new_candidates:
+                        method_candidate_counts[method_name] = method_candidate_counts.get(method_name, 0) + len(method_candidates)
+                        method_s1_hits[method_name] = method_s1_hits.get(method_name, 0) + 1
+                        incremental_candidate_counts[method_name] = incremental_candidate_counts.get(method_name, 0) + len(new_candidates)
+                        incremental_s1_hits[method_name] = incremental_s1_hits.get(method_name, 0) + 1
 
-                        incremental_candidate_counts[
-                            method_name
-                        ] += len(new_candidates)
-
-                        incremental_s1_hits[
-                            method_name
-                        ] += 1
-
-                    cumulative_candidates.update(
-                        method_candidates
-                    )
-
-                # ------------------------------------------------------
-                # Final candidate union
-                # ------------------------------------------------------
+                    # Bounded addition
+                    for cand_id in new_candidates:
+                        if len(cumulative_candidates) < 100:  # MAX_CANDIDATES_PER_S1
+                            cumulative_candidates.add(cand_id)
 
                 candidates = cumulative_candidates
-
                 n_cand = len(candidates)
-
                 candidate_counts.append(n_cand)
-
                 total_candidate_links += n_cand
 
                 if n_cand == 0:
                     zero_cand_s1 += 1
 
-                # ------------------------------------------------------
-                # Deterministic output
-                # ------------------------------------------------------
-
-                sorted_candidates = sorted(
-                    candidates
-                )
-
-                candidate_string = ",".join(
-                    sorted_candidates
-                )
-
-                out_fp.write(
-                    f"{s1_id}\t{candidate_string}\n"
-                )
+                sorted_candidates = sorted(candidates)
+                candidate_string = ",".join(sorted_candidates)
+                out_fp.write(f"{s1_id}\t{candidate_string}\n")
 
     # ------------------------------------------------------------------
     # 4. Aggregate diagnostics
