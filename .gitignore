@@ -7,3 +7,5 @@ __pycache__/
 *.tsv
 *.zip
 .env
+.DS_Store
+.pytest_cache/
