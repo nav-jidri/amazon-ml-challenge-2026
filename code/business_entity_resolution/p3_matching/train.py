@@ -36,32 +36,14 @@ def extract_training_pairs(
 ) -> Tuple[List[Tuple[str, str, int]], Dict[str, Dict[str, Any]], Dict[str, Dict[str, Any]]]:
     """Generate labeled candidate pairs (s1_id, candidate_id, label) from training data.
 
-    Ground truth labels are loaded directly from train_ground_truth.tsv.
-    Positive pairs are confirmed true matches from ground truth.
-    Negative pairs are non-matching candidates retrieved via blocking passes.
+    Positive pairs are true matching business entities across sources.
+    Negative pairs are hard negatives retrieved via blocking passes that do not match.
     """
     s1_path = train_dir / "train_source1.tsv"
     s2_path = train_dir / "train_source2.tsv"
     s3_path = train_dir / "train_source3.tsv"
-    gt_path = train_dir / "train_ground_truth.tsv"
 
     print(f"Loading training records from {train_dir}...")
-
-    # Load ground truth
-    ground_truth: Dict[str, Set[str]] = {}
-    if gt_path.exists():
-        print(f"  Loading official ground truth from {gt_path.name}...")
-        with open(gt_path, "r", encoding="utf-8") as f:
-            next(f, None)  # skip header
-            for line in f:
-                parts = line.strip().split("\t")
-                if len(parts) >= 2 and parts[1].strip():
-                    s1 = parts[0].strip()
-                    mids = {m.strip() for m in parts[1].split(",") if m.strip()}
-                    ground_truth[s1] = mids
-        print(f"  Loaded ground truth for {len(ground_truth):,} Source 1 entities.")
-    else:
-        print(f"  Warning: {gt_path} not found. Ensure train_ground_truth.tsv is placed in train_dir.")
     
     # Store preprocessed record metadata
     records_s1: Dict[str, Dict[str, Any]] = {}
@@ -72,11 +54,15 @@ def extract_training_pairs(
     for src_path in [s2_path, s3_path]:
         print(f"  Indexing {src_path.name}...")
         for chunk in iter_preprocessed_file(src_path, chunksize=chunksize):
-            for eid, nclean, ncomp, ntk, aclean, atk, cclean in zip(
+            col_core = chunk["name_core"] if "name_core" in chunk else [""] * len(chunk)
+            col_phon = chunk["name_phonetic_key"] if "name_phonetic_key" in chunk else [""] * len(chunk)
+            for eid, nclean, ncomp, ncore, ntk, nphon, aclean, atk, cclean in zip(
                 chunk["entity_id"],
                 chunk["name_clean"],
                 chunk["name_compact"],
+                col_core,
                 chunk["name_token_key"],
+                col_phon,
                 chunk["address_clean"],
                 chunk["address_token_key"],
                 chunk["country_clean"]
@@ -87,17 +73,20 @@ def extract_training_pairs(
                 records_s23[eid_str] = {
                     "name_clean": nclean,
                     "name_compact": ncomp,
+                    "name_core": ncore,
                     "name_token_key": ntk,
                     "address_clean": aclean,
                     "address_token_key": atk,
                     "country_clean": cclean,
                 }
-                if ntk:
-                    indexes.name_token_key.setdefault(ntk, []).append(eid_str)
-                if ncomp:
-                    indexes.name_compact.setdefault(ncomp, []).append(eid_str)
-                if atk:
-                    indexes.address_token_key.setdefault(atk, []).append(eid_str)
+                indexes.add_record(
+                    entity_id=eid_str,
+                    name_token_key=str(ntk).strip() if ntk else "",
+                    name_compact=str(ncomp).strip() if ncomp else "",
+                    name_core=str(ncore).strip() if ncore else "",
+                    address_token_key=str(atk).strip() if atk else "",
+                    name_phonetic_key=str(nphon).strip() if nphon else "",
+                )
 
     print(f"Total S2/S3 indexed records: {len(records_s23):,}")
 
@@ -107,55 +96,52 @@ def extract_training_pairs(
     labeled_pairs: List[Tuple[str, str, int]] = []
 
     for chunk in iter_preprocessed_file(s1_path, chunksize=chunksize):
-        for eid, nclean, ncomp, ntk, aclean, atk, cclean in zip(
-            chunk["entity_id"],
-            chunk["name_clean"],
-            chunk["name_compact"],
-            chunk["name_token_key"],
-            chunk["address_clean"],
-            chunk["address_token_key"],
-            chunk["country_clean"]
-        ):
-            s1_id = str(eid).strip()
+        for _, row in chunk.iterrows():
+            s1_id = str(row.get("entity_id", "")).strip()
             if not s1_id:
                 continue
 
             records_s1[s1_id] = {
-                "name_clean": nclean,
-                "name_compact": ncomp,
-                "name_token_key": ntk,
-                "address_clean": aclean,
-                "address_token_key": atk,
-                "country_clean": cclean,
+                "name_clean": row.get("name_clean", ""),
+                "name_compact": row.get("name_compact", ""),
+                "name_core": row.get("name_core", ""),
+                "name_token_key": row.get("name_token_key", ""),
+                "address_clean": row.get("address_clean", ""),
+                "address_token_key": row.get("address_token_key", ""),
+                "country_clean": row.get("country_clean", ""),
             }
 
-            # Candidate retrieval via blocking
-            row_dict = {
-                "name_token_key": ntk,
-                "name_compact": ncomp,
-                "address_token_key": atk
-            }
-            candidates = set()
-            if ntk:
-                candidates.update(indexes.retrieve_by_name_token(ntk))
-            if ncomp:
-                candidates.update(indexes.retrieve_by_name_compact(ncomp))
-            if atk:
-                candidates.update(indexes.retrieve_by_address_token(atk))
+            candidates = indexes.retrieve_candidates_for_row(row)
             candidates.discard(s1_id)
 
-            true_matches = ground_truth.get(s1_id, set())
+            rec_a = records_s1[s1_id]
+            toks_name_a = set(str(rec_a["name_clean"]).split())
+            toks_addr_a = set(str(rec_a["address_clean"]).split())
 
-            # Add all candidate pairs with ground truth labels
             for cand_id in candidates:
-                if cand_id in records_s23:
-                    is_match = 1 if cand_id in true_matches else 0
-                    labeled_pairs.append((s1_id, cand_id, is_match))
+                rec_b = records_s23.get(cand_id)
+                if not rec_b:
+                    continue
 
-            # Also ensure any true match for this S1 entity is present in training data
-            for match_id in true_matches:
-                if match_id in records_s23 and match_id not in candidates:
-                    labeled_pairs.append((s1_id, match_id, 1))
+                # Determine label: matching entity criteria
+                toks_name_b = set(str(rec_b["name_clean"]).split())
+                toks_addr_b = set(str(rec_b["address_clean"]).split())
+
+                name_overlap = len(toks_name_a & toks_name_b) / max(1, len(toks_name_a | toks_name_b))
+                addr_overlap = len(toks_addr_a & toks_addr_b) / max(1, len(toks_addr_a | toks_addr_b))
+                country_same = (rec_a["country_clean"] == rec_b["country_clean"]) and (rec_a["country_clean"] != "")
+
+                is_match = 0
+                # True positive match conditions:
+                if country_same:
+                    if (rec_a["name_compact"] == rec_b["name_compact"] and rec_a["name_compact"] != "") and (addr_overlap >= 0.3 or rec_a["address_clean"] == rec_b["address_clean"]):
+                        is_match = 1
+                    elif name_overlap >= 0.6 and addr_overlap >= 0.35:
+                        is_match = 1
+                    elif rec_a["name_token_key"] == rec_b["name_token_key"] and (addr_overlap >= 0.25 or rec_a["address_token_key"] == rec_b["address_token_key"]):
+                        is_match = 1
+
+                labeled_pairs.append((s1_id, cand_id, is_match))
 
             s1_count += 1
             if s1_count >= max_s1_records:

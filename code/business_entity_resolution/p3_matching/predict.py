@@ -41,10 +41,12 @@ def load_normalized_records(
     for path in [source2_path, source3_path]:
         print(f"  Streaming {path.name}...")
         for chunk in iter_preprocessed_file(path, chunksize=chunksize):
-            for eid, nclean, ncomp, ntk, aclean, atk, cclean in zip(
+            col_core = chunk["name_core"] if "name_core" in chunk else [""] * len(chunk)
+            for eid, nclean, ncomp, ncore, ntk, aclean, atk, cclean in zip(
                 chunk["entity_id"],
                 chunk["name_clean"],
                 chunk["name_compact"],
+                col_core,
                 chunk["name_token_key"],
                 chunk["address_clean"],
                 chunk["address_token_key"],
@@ -55,6 +57,7 @@ def load_normalized_records(
                     records_s23[eid_str] = {
                         "name_clean": nclean,
                         "name_compact": ncomp,
+                        "name_core": ncore,
                         "name_token_key": ntk,
                         "address_clean": aclean,
                         "address_token_key": atk,
@@ -66,10 +69,12 @@ def load_normalized_records(
     # Load S1 records
     print(f"  Streaming {source1_path.name}...")
     for chunk in iter_preprocessed_file(source1_path, chunksize=chunksize):
-        for eid, nclean, ncomp, ntk, aclean, atk, cclean in zip(
+        col_core = chunk["name_core"] if "name_core" in chunk else [""] * len(chunk)
+        for eid, nclean, ncomp, ncore, ntk, aclean, atk, cclean in zip(
             chunk["entity_id"],
             chunk["name_clean"],
             chunk["name_compact"],
+            col_core,
             chunk["name_token_key"],
             chunk["address_clean"],
             chunk["address_token_key"],
@@ -80,6 +85,7 @@ def load_normalized_records(
                 records_s1[eid_str] = {
                     "name_clean": nclean,
                     "name_compact": ncomp,
+                    "name_core": ncore,
                     "name_token_key": ntk,
                     "address_clean": aclean,
                     "address_token_key": atk,

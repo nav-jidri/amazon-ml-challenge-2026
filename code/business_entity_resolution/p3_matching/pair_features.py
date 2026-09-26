@@ -17,6 +17,7 @@ FEATURE_NAMES = [
     # --- Name Features ---
     "name_exact_clean",              # Exact equality of name_clean
     "name_exact_compact",            # Exact equality of name_compact
+    "name_core_exact",               # Exact equality of name_core (legal suffix normalized)
     "name_token_jaccard",            # Jaccard similarity of name token sets
     "name_token_overlap_count",      # Count of shared name tokens
     "name_token_containment_min",    # min(|A cap B| / |A|, |A cap B| / |B|)
@@ -99,7 +100,8 @@ def _char_similarity(s1: str, s2: str) -> float:
 def compute_pair_feature_vector(
     rec_a: Dict[str, Any],
     rec_b: Dict[str, Any],
-    b_entity_id: str = ""
+    b_entity_id: str = "",
+    precomputed_a: Optional[Dict[str, Any]] = None,
 ) -> List[float]:
     """Compute pairwise feature vector for two preprocessed records.
 
@@ -111,58 +113,65 @@ def compute_pair_feature_vector(
         P1 preprocessed fields for record B (Source 2 or 3)
     b_entity_id : str
         Identifier for record B (to determine S2 vs S3 indicator)
+    precomputed_a : dict, optional
+        Precomputed tokens, n-grams, and lengths for record A to avoid redundant work.
     """
     # Names
-    name_a = _safe_str(rec_a.get("name_clean", ""))
+    name_a = precomputed_a["name_a"] if precomputed_a else _safe_str(rec_a.get("name_clean", ""))
     name_b = _safe_str(rec_b.get("name_clean", ""))
     compact_a = _safe_str(rec_a.get("name_compact", ""))
     compact_b = _safe_str(rec_b.get("name_compact", ""))
+    core_a = _safe_str(rec_a.get("name_core", ""))
+    core_b = _safe_str(rec_b.get("name_core", ""))
     tkey_a = _safe_str(rec_a.get("name_token_key", ""))
     tkey_b = _safe_str(rec_b.get("name_token_key", ""))
 
-    tokens_a = set(name_a.split())
+    tokens_a = precomputed_a["tokens_a"] if precomputed_a else set(name_a.split())
     tokens_b = set(name_b.split())
 
     name_exact_clean = 1.0 if (name_a and name_a == name_b) else 0.0
     name_exact_compact = 1.0 if (compact_a and compact_a == compact_b) else 0.0
+    name_core_exact = 1.0 if (core_a and core_a == core_b) else 0.0
     name_token_jaccard = _jaccard_similarity(tokens_a, tokens_b)
     name_token_overlap_count = float(len(tokens_a & tokens_b))
     name_cont_min, name_cont_max = _containment(tokens_a, tokens_b)
     name_token_sort_ratio = _char_similarity(tkey_a, tkey_b)
 
-    name_ng2_a = _get_char_ngrams(name_a, 2)
+    name_ng2_a = precomputed_a["name_ng2_a"] if precomputed_a else _get_char_ngrams(name_a, 2)
     name_ng2_b = _get_char_ngrams(name_b, 2)
     name_char_2gram_jaccard = _jaccard_similarity(name_ng2_a, name_ng2_b)
 
-    name_ng3_a = _get_char_ngrams(name_a, 3)
+    name_ng3_a = precomputed_a["name_ng3_a"] if precomputed_a else _get_char_ngrams(name_a, 3)
     name_ng3_b = _get_char_ngrams(name_b, 3)
     name_char_3gram_jaccard = _jaccard_similarity(name_ng3_a, name_ng3_b)
 
-    len_na, len_nb = len(name_a), len(name_b)
+    len_na = precomputed_a["len_na"] if precomputed_a else len(name_a)
+    len_nb = len(name_b)
     name_len_diff = float(abs(len_na - len_nb))
     name_len_ratio = (min(len_na, len_nb) / max(len_na, len_nb)) if max(len_na, len_nb) > 0 else 1.0
 
     # Address
-    addr_a = _safe_str(rec_a.get("address_clean", ""))
+    addr_a = precomputed_a["addr_a"] if precomputed_a else _safe_str(rec_a.get("address_clean", ""))
     addr_b = _safe_str(rec_b.get("address_clean", ""))
-    addr_toks_a = set(addr_a.split())
+    addr_toks_a = precomputed_a["addr_toks_a"] if precomputed_a else set(addr_a.split())
     addr_toks_b = set(addr_b.split())
 
     addr_exact_clean = 1.0 if (addr_a and addr_a == addr_b) else 0.0
     addr_token_jaccard = _jaccard_similarity(addr_toks_a, addr_toks_b)
     addr_token_overlap_count = float(len(addr_toks_a & addr_toks_b))
 
-    nums_a = {t for t in addr_toks_a if re.match(r"^\d+$", t)}
+    nums_a = precomputed_a["nums_a"] if precomputed_a else {t for t in addr_toks_a if re.match(r"^\d+$", t)}
     nums_b = {t for t in addr_toks_b if re.match(r"^\d+$", t)}
     addr_num_overlap_count = float(len(nums_a & nums_b))
 
     addr_cont_min, addr_cont_max = _containment(addr_toks_a, addr_toks_b)
 
-    addr_ng3_a = _get_char_ngrams(addr_a, 3)
+    addr_ng3_a = precomputed_a["addr_ng3_a"] if precomputed_a else _get_char_ngrams(addr_a, 3)
     addr_ng3_b = _get_char_ngrams(addr_b, 3)
     addr_char_3gram_jaccard = _jaccard_similarity(addr_ng3_a, addr_ng3_b)
 
-    len_aa, len_ab = len(addr_a), len(addr_b)
+    len_aa = precomputed_a["len_aa"] if precomputed_a else len(addr_a)
+    len_ab = len(addr_b)
     addr_len_diff = float(abs(len_aa - len_ab))
     addr_len_ratio = (min(len_aa, len_ab) / max(len_aa, len_ab)) if max(len_aa, len_ab) > 0 else 1.0
 
@@ -183,6 +192,7 @@ def compute_pair_feature_vector(
     return [
         name_exact_clean,
         name_exact_compact,
+        name_core_exact,
         name_token_jaccard,
         name_token_overlap_count,
         name_cont_min,
@@ -216,18 +226,43 @@ def build_feature_matrix(
     records_s1: Dict[str, Dict[str, Any]],
     records_s23: Dict[str, Dict[str, Any]]
 ) -> np.ndarray:
-    """Generate feature matrix (N x M) for a batch of candidate pairs (s1_id, candidate_id)."""
+    """Generate feature matrix (N x M) for a batch of candidate pairs (s1_id, candidate_id).
+    
+    Caches S1-side token and character n-gram precomputations per batch to eliminate
+    redundant work without storing heavy Python sets across millions of records.
+    """
     rows = []
     dummy_rec = {
-        "name_clean": "", "name_compact": "", "name_token_key": "",
+        "name_clean": "", "name_compact": "", "name_core": "", "name_token_key": "",
         "address_clean": "", "address_token_key": "", "country_clean": ""
     }
+    s1_cache: Dict[str, Dict[str, Any]] = {}
+
     for s1_id, cand_id in pair_rows:
+        if s1_id not in s1_cache:
+            rec_a = records_s1.get(s1_id, dummy_rec)
+            name_a = _safe_str(rec_a.get("name_clean", ""))
+            addr_a = _safe_str(rec_a.get("address_clean", ""))
+            addr_toks_a = set(addr_a.split())
+            s1_cache[s1_id] = {
+                "name_a": name_a,
+                "tokens_a": set(name_a.split()),
+                "name_ng2_a": _get_char_ngrams(name_a, 2),
+                "name_ng3_a": _get_char_ngrams(name_a, 3),
+                "len_na": len(name_a),
+                "addr_a": addr_a,
+                "addr_toks_a": addr_toks_a,
+                "nums_a": {t for t in addr_toks_a if re.match(r"^\d+$", t)},
+                "addr_ng3_a": _get_char_ngrams(addr_a, 3),
+                "len_aa": len(addr_a),
+            }
+
         rec_a = records_s1.get(s1_id, dummy_rec)
         rec_b = records_s23.get(cand_id, dummy_rec)
-        feat = compute_pair_feature_vector(rec_a, rec_b, b_entity_id=cand_id)
+        feat = compute_pair_feature_vector(rec_a, rec_b, b_entity_id=cand_id, precomputed_a=s1_cache[s1_id])
         rows.append(feat)
 
     if not rows:
         return np.empty((0, len(FEATURE_NAMES)), dtype=np.float32)
     return np.asarray(rows, dtype=np.float32)
+
