@@ -14,6 +14,7 @@ from xgboost import XGBClassifier
 from business_entity_resolution.p3_matching.config import P3Config
 from business_entity_resolution.p3_matching.train import extract_training_and_val_data
 from business_entity_resolution.p3_matching.pair_features import build_feature_matrix
+from business_entity_resolution.p3_matching.rules import apply_business_rules
 
 
 def export_validation_artifacts(max_records: int = 50000, val_ratio: float = 0.2):
@@ -72,7 +73,8 @@ def export_validation_artifacts(max_records: int = 50000, val_ratio: float = 0.2
         with open(val_scored_path, "w", encoding="utf-8") as f:
             f.write("source1_entity_id\tcandidate_entity_id\tmatch_probability\n")
             for (s1_id, cand_id), prob in zip(val_cand_pairs, val_probs):
-                f.write(f"{s1_id}\t{cand_id}\t{prob:.6f}\n")
+                final_prob = apply_business_rules(float(prob), recs_s1.get(s1_id, {}), recs_s23.get(cand_id, {}))
+                f.write(f"{s1_id}\t{cand_id}\t{final_prob:.6f}\n")
         print(f"Exported scored validation pairs to: {val_scored_path}", flush=True)
 
 

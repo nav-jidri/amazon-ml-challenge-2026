@@ -27,6 +27,7 @@ from business_entity_resolution.preprocessing import iter_preprocessed_file
 from business_entity_resolution.blocking import Indexes
 from business_entity_resolution.p3_matching.config import P3Config
 from business_entity_resolution.p3_matching.pair_features import FEATURE_NAMES, build_feature_matrix, compute_pair_feature_vector
+from business_entity_resolution.p3_matching.rules import apply_business_rules
 
 
 def load_ground_truth(gt_path: Path) -> Dict[str, Set[str]]:
@@ -56,8 +57,8 @@ def load_ground_truth(gt_path: Path) -> Dict[str, Set[str]]:
 
 def extract_training_and_val_data(
     train_dir: Path,
-    max_s1_records: int = 25000,
-    max_s23_records: int = 300000,
+    max_s1_records: int = 100000,
+    max_s23_records: int = 0,
     val_ratio: float = 0.2,
     chunksize: int = 50000,
     random_seed: int = 42
@@ -140,17 +141,12 @@ def extract_training_and_val_data(
         target_s23_ids.update(ground_truth.get(s1_id, set()))
     print(f"  Target true ground truth matches to guarantee: {len(target_s23_ids):,}")
 
-    # 3. Store preprocessed record metadata and build blocking indexes from S2/S3
-    records_s23: Dict[str, Dict[str, Any]] = {}
+    # 3. Build blocking inverted indexes from S2 and S3 (Pass 1: Inverted Index construction)
     indexes = Indexes()
+    total_indexed = 0
 
     for src_path in [s2_path, s3_path]:
-        print(f"  Indexing {src_path.name}...")
-        source_prefix = "S2" if "source2" in src_path.name.lower() else "S3"
-        needed_for_source = {eid for eid in target_s23_ids if eid.startswith(source_prefix)}
-        found_target_ids: Set[str] = set()
-        src_indexed_count = 0
-
+        print(f"  Indexing {src_path.name} for candidate retrieval...", flush=True)
         for chunk in iter_preprocessed_file(src_path, chunksize=chunksize):
             col_core = chunk["name_core"] if "name_core" in chunk else [""] * len(chunk)
             col_phon = chunk["name_phonetic_key"] if "name_phonetic_key" in chunk else [""] * len(chunk)
@@ -188,12 +184,75 @@ def extract_training_and_val_data(
                 if not eid_str:
                     continue
 
-                is_target = eid_str in needed_for_source
-                if is_target:
-                    found_target_ids.add(eid_str)
+                indexes.add_record(
+                    entity_id=eid_str,
+                    name_token_key=str(ntk).strip() if ntk else "",
+                    name_compact=str(ncomp).strip() if ncomp else "",
+                    name_core=str(ncore).strip() if ncore else "",
+                    address_token_key=str(atk).strip() if atk else "",
+                    name_phonetic_key=str(nphon).strip() if nphon else "",
+                    name_ascii_compact=str(nascii).strip() if nascii else "",
+                    name_significant_token_key=str(nsig).strip() if nsig else "",
+                    name_first_two_tokens=str(ntwo).strip() if ntwo else "",
+                    address_component_key=str(acomp).strip() if acomp else "",
+                    address_street_key=str(astreet).strip() if astreet else "",
+                    address_house_geo_key=str(ahouse_geo).strip() if ahouse_geo else "",
+                    address_house_postcode_key=str(apost).strip() if apost else "",
+                )
+                total_indexed += 1
 
-                # Keep if we haven't reached max_s23_records OR if it's a target true match
-                if max_s23_records <= 0 or src_indexed_count < max_s23_records or is_target:
+            if max_s23_records > 0 and total_indexed >= max_s23_records:
+                break
+
+    print(f"Total S2/S3 indexed records in blocking tables: {total_indexed:,}", flush=True)
+
+    # 4. Stream S1 and collect candidate sets
+    print(f"Retrieving candidate pairs for {len(s1_rows):,} S1 entities...", flush=True)
+    s1_candidates_map: Dict[str, Set[str]] = {}
+    needed_s23_ids: Set[str] = set(target_s23_ids)
+
+    for row_dict in s1_rows:
+        s1_id = row_dict["entity_id"]
+        candidates = indexes.retrieve_candidates_for_row(row_dict)
+        candidates.discard(s1_id)
+        s1_candidates_map[s1_id] = candidates
+        needed_s23_ids.update(candidates)
+
+    print(f"Target candidate entities to load representation for: {len(needed_s23_ids):,} (out of {total_indexed:,})", flush=True)
+
+    # 4b. Load representation dictionaries ONLY for required candidates (Pass 2)
+    records_s23: Dict[str, Dict[str, Any]] = {}
+    for src_path in [s2_path, s3_path]:
+        print(f"  Streaming {src_path.name} representations...", flush=True)
+        for chunk in iter_preprocessed_file(src_path, chunksize=chunksize):
+            col_core = chunk["name_core"] if "name_core" in chunk else [""] * len(chunk)
+            col_nascii = chunk["name_ascii_compact"] if "name_ascii_compact" in chunk else [""] * len(chunk)
+            col_nsig = chunk["name_significant_token_key"] if "name_significant_token_key" in chunk else [""] * len(chunk)
+            col_ntwo = chunk["name_first_two_tokens"] if "name_first_two_tokens" in chunk else [""] * len(chunk)
+            col_acomp = chunk["address_component_key"] if "address_component_key" in chunk else [""] * len(chunk)
+            col_astreet = chunk["address_street_key"] if "address_street_key" in chunk else [""] * len(chunk)
+            col_ahouse = chunk["address_house_number"] if "address_house_number" in chunk else [""] * len(chunk)
+            col_post = chunk["address_postal_code"] if "address_postal_code" in chunk else [""] * len(chunk)
+
+            for eid, nclean, ncomp, ncore, nascii, nsig, ntwo, ntk, aclean, atk, acomp, astreet, ahouse, post, cclean in zip(
+                chunk["entity_id"],
+                chunk["name_clean"],
+                chunk["name_compact"],
+                col_core,
+                col_nascii,
+                col_nsig,
+                col_ntwo,
+                chunk["name_token_key"],
+                chunk["address_clean"],
+                chunk["address_token_key"],
+                col_acomp,
+                col_astreet,
+                col_ahouse,
+                col_post,
+                chunk["country_clean"]
+            ):
+                eid_str = str(eid).strip()
+                if eid_str in needed_s23_ids:
                     records_s23[eid_str] = {
                         "name_clean": nclean,
                         "name_compact": ncomp,
@@ -210,37 +269,10 @@ def extract_training_and_val_data(
                         "address_postal_code": post,
                         "country_clean": cclean,
                     }
-                    indexes.add_record(
-                        entity_id=eid_str,
-                        name_token_key=str(ntk).strip() if ntk else "",
-                        name_compact=str(ncomp).strip() if ncomp else "",
-                        name_core=str(ncore).strip() if ncore else "",
-                        address_token_key=str(atk).strip() if atk else "",
-                        name_phonetic_key=str(nphon).strip() if nphon else "",
-                        name_ascii_compact=str(nascii).strip() if nascii else "",
-                        name_significant_token_key=str(nsig).strip() if nsig else "",
-                        name_first_two_tokens=str(ntwo).strip() if ntwo else "",
-                        address_component_key=str(acomp).strip() if acomp else "",
-                        address_street_key=str(astreet).strip() if astreet else "",
-                        address_house_geo_key=str(ahouse_geo).strip() if ahouse_geo else "",
-                        address_house_postcode_key=str(apost).strip() if apost else "",
-                    )
-                    src_indexed_count += 1
+        if len(records_s23) >= len(needed_s23_ids):
+            break
 
-            if max_s23_records > 0 and src_indexed_count >= max_s23_records and len(found_target_ids) >= len(needed_for_source):
-                break
-
-    print(f"Total S2/S3 indexed records: {len(records_s23):,}")
-
-    # 4. Stream S1 and collect candidates
-    print(f"Retrieving candidates for {len(s1_rows):,} S1 entities...")
-    s1_candidates_map: Dict[str, Set[str]] = {}
-
-    for row_dict in s1_rows:
-        s1_id = row_dict["entity_id"]
-        candidates = indexes.retrieve_candidates_for_row(row_dict)
-        candidates.discard(s1_id)
-        s1_candidates_map[s1_id] = candidates
+    print(f"Loaded {len(records_s23):,} S2/S3 candidate representations into memory (Memory footprint: ~{len(records_s23)*1.5/1024:.1f} MB)", flush=True)
 
     # 5. Split S1 entities into Train and Validation holdout sets
     rng = np.random.RandomState(random_seed)
@@ -251,33 +283,68 @@ def extract_training_and_val_data(
     val_s1_set = set(shuffled_s1[:n_val])
     train_s1_set = set(shuffled_s1[n_val:])
 
-    print(f"  Train S1 entities: {len(train_s1_set):,}")
-    print(f"  Holdout Val S1 entities: {len(val_s1_set):,}")
+    print(f"  Train S1 entities: {len(train_s1_set):,}", flush=True)
+    print(f"  Holdout Val S1 entities: {len(val_s1_set):,}", flush=True)
 
-    # 6. Build Training Pairs
+    # 6. Build Training Pairs (with Structural Hard-Negative Mining)
     train_labeled_pairs: List[Tuple[str, str, int]] = []
+    max_negs_per_s1 = 25  # Optimal ratio (~15-20% positives) prioritizing hard collisions
+
     for s1_id in train_s1_set:
         cands = s1_candidates_map.get(s1_id, set())
         true_set = ground_truth.get(s1_id, set())
+        s1_rec = records_s1.get(s1_id, {})
+        s1_ncore = s1_rec.get("name_core", "")
+        s1_astreet = s1_rec.get("address_street_key", "")
+        s1_apost = s1_rec.get("address_postal_code", "")
 
-        for cand_id in cands:
-            if cand_id in records_s23:
-                label = 1 if cand_id in true_set else 0
-                train_labeled_pairs.append((s1_id, cand_id, label))
-
-        # Augment true matches in training set so model learns positive matching signals
+        # 1. Positive matches (always include all GT matches)
         for true_id in true_set:
-            if true_id in records_s23 and true_id not in cands:
+            if true_id in records_s23:
                 train_labeled_pairs.append((s1_id, true_id, 1))
 
-    # 7. Build Validation Holdout Candidate Pairs & Ground Truth
+        # 2. Hard-negative prioritization (prioritize near-misses on street, postal code, or brand root)
+        neg_cands = [cid for cid in cands if cid not in true_set and cid in records_s23]
+        if len(neg_cands) > max_negs_per_s1:
+            hard_negs = []
+            regular_negs = []
+            for cid in neg_cands:
+                cand_rec = records_s23.get(cid, {})
+                is_hard = False
+                if s1_astreet and cand_rec.get("address_street_key", "") == s1_astreet:
+                    is_hard = True
+                elif s1_ncore and cand_rec.get("name_core", "") == s1_ncore:
+                    is_hard = True
+                elif s1_apost and cand_rec.get("address_postal_code", "") == s1_apost:
+                    is_hard = True
+
+                if is_hard:
+                    hard_negs.append(cid)
+                else:
+                    regular_negs.append(cid)
+
+            if len(hard_negs) >= max_negs_per_s1:
+                sampled_negs = rng.choice(hard_negs, size=max_negs_per_s1, replace=False).tolist()
+            else:
+                needed_rem = max_negs_per_s1 - len(hard_negs)
+                if len(regular_negs) > needed_rem:
+                    sampled_regular = rng.choice(regular_negs, size=needed_rem, replace=False).tolist()
+                else:
+                    sampled_regular = regular_negs
+                sampled_negs = hard_negs + sampled_regular
+        else:
+            sampled_negs = neg_cands
+
+        for cand_id in sampled_negs:
+            train_labeled_pairs.append((s1_id, cand_id, 0))
+
+    # 7. Build Validation Holdout Candidate Pairs & Ground Truth (No negative subsampling in validation)
     val_candidate_pairs: List[Tuple[str, str]] = []
     val_candidates_by_s1: Dict[str, Set[str]] = {}
     val_ground_truth: Dict[str, Set[str]] = {}
 
     for s1_id in val_s1_set:
         val_ground_truth[s1_id] = ground_truth.get(s1_id, set())
-
         cands = s1_candidates_map.get(s1_id, set())
         val_candidates_by_s1[s1_id] = set()
 
@@ -298,10 +365,10 @@ def extract_training_and_val_data(
 
 def train_p3_model(
     config: P3Config,
-    max_train_records: int = 25000,
-    max_s23_records: int = 300000,
+    max_train_records: int = 100000,
+    max_s23_records: int = 0,
     val_ratio: float = 0.2,
-    scale_pos_weight: Optional[float] = 1.0,
+    scale_pos_weight: Optional[float] = None,
 ) -> Tuple[XGBClassifier, Dict[str, Any]]:
     """Train XGBoost matching model with genuine entity-level holdout evaluation."""
     print("=" * 80)
@@ -353,15 +420,19 @@ def train_p3_model(
 
     print(f"  Feature matrix shapes: X_train = {X_train.shape}, X_val = {X_val.shape}", flush=True)
 
+    pos_count = int(np.sum(y_train == 1))
+    neg_count = int(np.sum(y_train == 0))
     if scale_pos_weight is None or scale_pos_weight <= 0:
-        # Default unweighted
-        effective_spw = 1.0
+        effective_spw = float(neg_count) / float(pos_count) if pos_count > 0 else 1.0
+        print(f"\nAuto-computed scale_pos_weight from training balance: {effective_spw:.2f} ({neg_count:,} neg / {pos_count:,} pos)", flush=True)
     else:
         effective_spw = scale_pos_weight
-    print(f"\nUsing scale_pos_weight: {effective_spw:.2f}", flush=True)
+        print(f"\nUsing manual scale_pos_weight: {effective_spw:.2f}", flush=True)
 
     params = config.xgb_params.copy()
     params["scale_pos_weight"] = effective_spw
+    if len(X_val) > 0:
+        params["early_stopping_rounds"] = 25
 
     print("\nTraining XGBoost Classifier...", flush=True)
     model = XGBClassifier(**params)
@@ -426,7 +497,8 @@ def train_p3_model(
         tp_count = 0
         fp_count = 0
 
-        for (s1_id, cand_id), prob in scored_pairs:
+        for (s1_id, cand_id), raw_prob in scored_pairs:
+            prob = apply_business_rules(float(raw_prob), recs_s1.get(s1_id, {}), recs_s23.get(cand_id, {}))
             if prob >= thresh_val:
                 predictions[s1_id].add(cand_id)
                 pred_match_count += 1
@@ -481,7 +553,8 @@ def train_p3_model(
     with open(val_scored_path, "w", encoding="utf-8") as f:
         f.write("source1_entity_id\tcandidate_entity_id\tmatch_probability\n")
         for (s1_id, cand_id), prob in scored_pairs:
-            f.write(f"{s1_id}\t{cand_id}\t{prob:.6f}\n")
+            final_prob = apply_business_rules(float(prob), recs_s1.get(s1_id, {}), recs_s23.get(cand_id, {}))
+            f.write(f"{s1_id}\t{cand_id}\t{final_prob:.6f}\n")
     print(f"Saved {len(scored_pairs):,} scored validation candidate pairs to: {val_scored_path}", flush=True)
 
     # Feature importances
@@ -505,10 +578,10 @@ def train_p3_model(
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Train P3 Matching Model")
-    parser.add_argument("--max-records", type=int, default=25000, help="Max S1 records for training pairs")
-    parser.add_argument("--max-s23-records", type=int, default=300000, help="Max S2/S3 records to index (0 for all)")
+    parser.add_argument("--max-records", type=int, default=100000, help="Max S1 records for training pairs (default: 100,000)")
+    parser.add_argument("--max-s23-records", type=int, default=0, help="Max S2/S3 records to index (0 for all)")
     parser.add_argument("--val-ratio", type=float, default=0.2, help="Validation split ratio")
-    parser.add_argument("--scale-pos-weight", type=float, default=1.0, help="XGBoost scale_pos_weight (default 1.0 for true posterior probabilities)")
+    parser.add_argument("--scale-pos-weight", type=float, default=None, help="XGBoost scale_pos_weight (default: auto-computed from split balance)")
     args = parser.parse_args()
 
     config = P3Config()

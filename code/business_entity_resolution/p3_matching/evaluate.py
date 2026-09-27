@@ -88,10 +88,9 @@ def evaluate_scored_pairs(
     # Filter predictions at threshold
     filtered_df = scored_pairs_df[scored_pairs_df["match_probability"] >= threshold]
     predictions: Dict[str, Set[str]] = {}
-    for _, row in filtered_df.iterrows():
-        s1 = str(row["source1_entity_id"])
-        cand = str(row["candidate_entity_id"])
-        predictions.setdefault(s1, set()).add(cand)
+    if not filtered_df.empty:
+        for s1, cand in zip(filtered_df["source1_entity_id"], filtered_df["candidate_entity_id"]):
+            predictions.setdefault(str(s1), set()).add(str(cand))
 
     macro_p, macro_r, macro_f05 = compute_entity_macro_f05(ground_truth, predictions)
     return {

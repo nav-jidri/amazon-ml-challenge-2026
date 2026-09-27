@@ -32,6 +32,21 @@ OUTPUT_DIR = BASE_DIR / "amazon-ml-challenge-2026" / "output" if (BASE_DIR / "am
 MODEL_DIR = Path(__file__).resolve().parent / "artifacts"
 
 
+def _detect_device() -> str:
+    """Auto-detect if NVIDIA GPU/CUDA is available for XGBoost."""
+    try:
+        import xgboost as xgb
+        import numpy as np
+        clf = xgb.XGBClassifier(n_estimators=1, max_depth=1, tree_method="hist", device="cuda")
+        clf.fit(np.zeros((2, 2)), np.array([0, 1]))
+        return "cuda"
+    except Exception:
+        return "cpu"
+
+
+_DETECTED_DEVICE = _detect_device()
+
+
 @dataclass
 class P3Config:
     """P3 Matching Model Configuration."""
@@ -47,7 +62,8 @@ class P3Config:
         "eval_metric": "logloss",
         "random_state": 42,
         "n_jobs": -1,
-        "tree_method": "hist"
+        "tree_method": "hist",
+        "device": _DETECTED_DEVICE
     })
     
     # Data & Paths

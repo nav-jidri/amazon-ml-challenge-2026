@@ -23,6 +23,7 @@ if code_dir not in sys.path:
 from business_entity_resolution.preprocessing import iter_preprocessed_file
 from business_entity_resolution.p3_matching.config import P3Config
 from business_entity_resolution.p3_matching.pair_features import build_feature_matrix
+from business_entity_resolution.p3_matching.rules import apply_business_rules
 
 
 
@@ -223,6 +224,7 @@ def score_candidate_pairs(
                 probs = model.predict_proba(X_batch)[:, 1]
 
                 for (s1, cand), prob in zip(buffer_pairs, probs):
+                    prob = apply_business_rules(float(prob), records_s1.get(s1, {}), records_s23.get(cand, {}))
                     out_fp.write(f"{s1}\t{cand}\t{prob:.6f}\n")
 
                 total_pairs_scored += len(buffer_pairs)
@@ -233,6 +235,7 @@ def score_candidate_pairs(
             X_batch = build_feature_matrix(buffer_pairs, records_s1, records_s23)
             probs = model.predict_proba(X_batch)[:, 1]
             for (s1, cand), prob in zip(buffer_pairs, probs):
+                prob = apply_business_rules(float(prob), records_s1.get(s1, {}), records_s23.get(cand, {}))
                 out_fp.write(f"{s1}\t{cand}\t{prob:.6f}\n")
             total_pairs_scored += len(buffer_pairs)
             buffer_pairs.clear()

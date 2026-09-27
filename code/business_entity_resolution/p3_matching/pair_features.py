@@ -46,21 +46,25 @@ FEATURE_NAMES = [
     # --- Country Features ---
     "country_match",                 # Exact match on country_clean
     "country_missing_either",        # 1 if either record country is empty
+    "country_strict_mismatch",       # 1 if both records have country and they differ (critical negative)
 
     # --- Interaction & Meta Features ---
     "source_is_s2",                  # 1 if candidate is from S2
     "source_is_s3",                  # 1 if candidate is from S3
     "name_addr_joint_jaccard",       # name_token_jaccard * addr_token_jaccard
+    "name_addr_geo_mean",            # sqrt(name_token_jaccard * addr_token_jaccard)
     "name_empty_either",             # 1 if either record name is missing/empty
     "addr_empty_either",             # 1 if either record address is missing/empty
 
-    # --- Discriminative Street & House Number Features ---
+    # --- Discriminative Negative Penalties ---
     "addr_street_key_match",         # Exact match on address_street_key
     "addr_house_num_match",          # Exact match on house_number
     "addr_house_num_mismatch",       # 1 if both have house numbers and they differ (critical negative)
     "addr_postcode_mismatch",        # 1 if both have postal codes and they differ (critical negative)
     "name_first_two_tokens_match",   # Exact match on name_first_two_tokens
     "name_first_two_tokens_overlap", # Count of shared leading tokens
+    "name_low_addr_high_penalty",    # 1 if address matches high but name matches low (same-building false positive)
+    "name_high_addr_low_penalty",    # 1 if name matches high but address matches low (different-location chain)
 ]
 
 
@@ -194,12 +198,14 @@ def compute_pair_feature_vector(
     c_b = _safe_str(rec_b.get("country_clean", ""))
     country_match = 1.0 if (c_a and c_b and c_a == c_b) else 0.0
     country_missing_either = 1.0 if (not c_a or not c_b) else 0.0
+    country_strict_mismatch = 1.0 if (c_a and c_b and c_a != c_b) else 0.0
 
     # Interaction & Source meta
     b_id = b_entity_id or _safe_str(rec_b.get("entity_id", ""))
     source_is_s2 = 1.0 if b_id.startswith("S2-") else 0.0
     source_is_s3 = 1.0 if b_id.startswith("S3-") else 0.0
     name_addr_joint_jaccard = name_token_jaccard * addr_token_jaccard
+    name_addr_geo_mean = math.sqrt(name_token_jaccard * addr_token_jaccard)
     name_empty_either = 1.0 if (not name_a or not name_b) else 0.0
     addr_empty_either = 1.0 if (not addr_a or not addr_b) else 0.0
 
@@ -221,6 +227,18 @@ def compute_pair_feature_vector(
     s_two_a = set(two_toks_a.split()) if two_toks_a else set()
     s_two_b = set(two_toks_b.split()) if two_toks_b else set()
     name_first_two_tokens_overlap = float(len(s_two_a & s_two_b))
+
+    # Anti-FPR asymmetric penalties (gated on non-empty values so sparse data is not falsely penalized):
+    # 1. High address match but near-zero name match (same-building / multi-tenant false positive)
+    name_low_addr_high_penalty = 1.0 if (
+        addr_token_jaccard >= 0.60 and name_token_jaccard < 0.15
+        and name_core_exact == 0.0 and name_empty_either == 0.0
+    ) else 0.0
+    # 2. High name match but near-zero address match (chain brand in different city/branch)
+    name_high_addr_low_penalty = 1.0 if (
+        name_token_jaccard >= 0.70 and addr_token_jaccard < 0.15
+        and addr_comp_exact == 0.0 and addr_empty_either == 0.0
+    ) else 0.0
 
     return [
         name_exact_clean,
@@ -250,9 +268,11 @@ def compute_pair_feature_vector(
         addr_len_ratio,
         country_match,
         country_missing_either,
+        country_strict_mismatch,
         source_is_s2,
         source_is_s3,
         name_addr_joint_jaccard,
+        name_addr_geo_mean,
         name_empty_either,
         addr_empty_either,
         addr_street_key_match,
@@ -261,6 +281,8 @@ def compute_pair_feature_vector(
         addr_postcode_mismatch,
         name_two_tokens_match,
         name_first_two_tokens_overlap,
+        name_low_addr_high_penalty,
+        name_high_addr_low_penalty,
     ]
 
 

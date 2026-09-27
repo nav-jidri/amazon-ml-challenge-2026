@@ -30,10 +30,11 @@ code_dir = str(Path(__file__).resolve().parents[2])
 if code_dir not in sys.path:
     sys.path.insert(0, code_dir)
 
-from business_entity_resolution.p3_matching.config import P3Config
+from business_entity_resolution.p3_matching.config import P3Config, _DETECTED_DEVICE
 from business_entity_resolution.p3_matching.train import extract_training_and_val_data
 from business_entity_resolution.p3_matching.pair_features import FEATURE_NAMES, build_feature_matrix
 from business_entity_resolution.p3_matching.evaluate import compute_entity_macro_f05
+from business_entity_resolution.p3_matching.rules import apply_business_rules
 
 
 def evaluate_model_holdout(
@@ -41,6 +42,8 @@ def evaluate_model_holdout(
     val_probs: np.ndarray,
     val_cand_pairs: List[Tuple[str, str]],
     val_ground_truth: Dict[str, Set[str]],
+    recs_s1: Dict[str, Dict[str, Any]],
+    recs_s23: Dict[str, Dict[str, Any]],
     beta: float = 0.5
 ) -> Dict[str, Any]:
     """Compute precision, recall, false positives, and peak Macro F0.5 across thresholds."""
@@ -61,7 +64,8 @@ def evaluate_model_holdout(
         tp_count = 0
         fp_count = 0
 
-        for (s1_id, cand_id), prob in scored_pairs:
+        for (s1_id, cand_id), raw_prob in scored_pairs:
+            prob = apply_business_rules(float(raw_prob), recs_s1.get(s1_id, {}), recs_s23.get(cand_id, {}))
             if prob >= thresh_val:
                 predictions[s1_id].add(cand_id)
                 if cand_id in val_ground_truth.get(s1_id, set()):
@@ -137,27 +141,34 @@ def run_benchmark(
     y_train = np.array(train_labels, dtype=int)
     X_val = build_feature_matrix(val_cand_pairs, recs_s1, recs_s23)
 
+    pos_c = sum(y_train == 1)
+    neg_c = sum(y_train == 0)
+    spw = (float(neg_c) / float(pos_c)) if pos_c > 0 else 1.0
+    print(f"\nAuto-computed scale_pos_weight for benchmark: {spw:.2f} ({neg_c:,} neg / {pos_c:,} pos)", flush=True)
+
     models_to_test = {}
 
-    # 1. XGBoost Standard
-    print("\n[1/4] Training XGBoost Standard (depth=6, n_est=300)...", flush=True)
+    # 1. XGBoost Standard (depth=6, lr=0.08)
+    print("\n[1/4] Training XGBoost Standard on GPU...", flush=True)
     xgb_std = XGBClassifier(
         n_estimators=300,
         max_depth=6,
-        learning_rate=0.10,
+        learning_rate=0.08,
         subsample=0.8,
         colsample_bytree=0.8,
-        scale_pos_weight=1.0,
+        scale_pos_weight=spw,
+        tree_method="hist",
+        device=_DETECTED_DEVICE,
         eval_metric="logloss",
         random_state=42,
         n_jobs=-1
     )
     xgb_std.fit(X_train, y_train)
     probs_xgb_std = xgb_std.predict_proba(X_val)[:, 1]
-    models_to_test["XGBoost Standard"] = (xgb_std, probs_xgb_std)
+    models_to_test["XGBoost Standard (depth=6)"] = (xgb_std, probs_xgb_std)
 
-    # 2. XGBoost Deep / Regularized
-    print("[2/4] Training XGBoost Deep (depth=8, lr=0.05, lambda=2.0)...", flush=True)
+    # 2. XGBoost Deep / Regularized (depth=8, reg_lambda=2.0)
+    print("[2/4] Training XGBoost Deep on GPU (depth=8, lr=0.05)...", flush=True)
     xgb_deep = XGBClassifier(
         n_estimators=350,
         max_depth=8,
@@ -165,7 +176,9 @@ def run_benchmark(
         subsample=0.85,
         colsample_bytree=0.85,
         reg_lambda=2.0,
-        scale_pos_weight=1.0,
+        scale_pos_weight=spw,
+        tree_method="hist",
+        device=_DETECTED_DEVICE,
         eval_metric="logloss",
         random_state=42,
         n_jobs=-1
@@ -205,7 +218,7 @@ def run_benchmark(
     best_model_obj = None
 
     for name, (model_obj, probs) in models_to_test.items():
-        res = evaluate_model_holdout(name, probs, val_cand_pairs, val_ground_truth, beta=config.f_beta)
+        res = evaluate_model_holdout(name, probs, val_cand_pairs, val_ground_truth, recs_s1, recs_s23, beta=config.f_beta)
         benchmark_results.append(res)
 
         print(
@@ -236,8 +249,8 @@ def run_benchmark(
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Benchmark multiple P3 matching models")
-    parser.add_argument("--max-records", type=int, default=25000, help="Max S1 records for training pairs")
-    parser.add_argument("--max-s23-records", type=int, default=300000, help="Max S2/S3 records to index")
+    parser.add_argument("--max-records", type=int, default=50000, help="Max S1 records for training pairs (default: 50,000)")
+    parser.add_argument("--max-s23-records", type=int, default=0, help="Max S2/S3 records to index (0 for all)")
     parser.add_argument("--val-ratio", type=float, default=0.2, help="Validation split ratio")
     args = parser.parse_args()
 
