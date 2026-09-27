@@ -192,25 +192,47 @@ def score_candidate_pairs(
     model.load_model(str(model_path))
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    # Check for resume
+    already_scored_s1: set = set()
+    already_scored_pairs: int = 0
+    file_mode = "w"
+
+    if output_path.exists() and output_path.stat().st_size > 0:
+        print(f"Existing scored file detected at {output_path.name} ({output_path.stat().st_size / (1024*1024):.1f} MB). Scanning for resume...", flush=True)
+        with open(output_path, "r", encoding="utf-8") as prev_fp:
+            _ = prev_fp.readline()  # header
+            for line in prev_fp:
+                s1_id = line.split("\t", 1)[0].strip()
+                if s1_id:
+                    already_scored_s1.add(s1_id)
+                already_scored_pairs += 1
+
+        if already_scored_s1:
+            file_mode = "a"
+            print(f"  --> Resuming from previous run! Already scored {len(already_scored_s1):,} S1 entities ({already_scored_pairs:,} pairs).", flush=True)
+            print(f"  --> Skipping already-scored S1 entities and continuing with remaining records...", flush=True)
+
     print(f"Scoring candidate pairs from {candidate_pairs_path.name} -> {output_path.name} (Batch size: {batch_size:,})...", flush=True)
 
-    total_pairs_scored = 0
+    total_pairs_scored = already_scored_pairs
+    new_pairs_scored = 0
     buffer_pairs: List[Tuple[str, str]] = []
     start_time = time.time()
     last_log_time = start_time
 
     # 16MB write buffer for high-throughput disk writing
     with open(candidate_pairs_path, "r", encoding="utf-8") as in_fp, \
-         open(output_path, "w", encoding="utf-8", newline="\n", buffering=16 * 1024 * 1024) as out_fp:
+         open(output_path, file_mode, encoding="utf-8", newline="\n", buffering=16 * 1024 * 1024) as out_fp:
 
-        # Header
-        out_fp.write("source1_entity_id\tcandidate_entity_id\tmatch_probability\n")
+        if file_mode == "w":
+            out_fp.write("source1_entity_id\tcandidate_entity_id\tmatch_probability\n")
 
         # Skip header of candidate_pairs.tsv
         _ = in_fp.readline()
 
         def _process_batch(pairs: List[Tuple[str, str]]) -> None:
-            nonlocal total_pairs_scored, last_log_time
+            nonlocal total_pairs_scored, new_pairs_scored, last_log_time
             if not pairs:
                 return
             X_batch = build_feature_matrix(pairs, records_s1, records_s23)
@@ -225,11 +247,12 @@ def score_candidate_pairs(
             out_fp.write(chunk_str)
 
             total_pairs_scored += len(pairs)
+            new_pairs_scored += len(pairs)
             now = time.time()
-            if now - last_log_time >= 5.0 or total_pairs_scored % 1_000_000 == 0:
+            if now - last_log_time >= 5.0 or new_pairs_scored % 1_000_000 == 0:
                 elapsed = now - start_time
-                rate = total_pairs_scored / elapsed if elapsed > 0 else 0
-                print(f"  Scored {total_pairs_scored:11,d} pairs | {rate:6,.0f} pairs/sec | Elapsed: {elapsed/60:4.1f} min", flush=True)
+                rate = new_pairs_scored / elapsed if elapsed > 0 else 0
+                print(f"  Scored {total_pairs_scored:11,d} total pairs ({new_pairs_scored:,} new) | {rate:6,.0f} pairs/sec | Elapsed: {elapsed/60:4.1f} min", flush=True)
                 last_log_time = now
 
         for line in in_fp:
@@ -237,7 +260,7 @@ def score_candidate_pairs(
             if not parts or len(parts) < 1:
                 continue
             s1_id = parts[0].strip()
-            if not s1_id:
+            if not s1_id or s1_id in already_scored_s1:
                 continue
 
             cands_str = parts[1].strip() if len(parts) > 1 else ""
@@ -259,8 +282,8 @@ def score_candidate_pairs(
             buffer_pairs.clear()
 
     total_time = time.time() - start_time
-    avg_rate = total_pairs_scored / total_time if total_time > 0 else 0
-    print(f"\nScoring completed in {total_time/60:.2f} min! Total pairs: {total_pairs_scored:,} (Avg: {avg_rate:,.0f} pairs/sec)", flush=True)
+    avg_rate = new_pairs_scored / total_time if total_time > 0 else 0
+    print(f"\nScoring completed in {total_time/60:.2f} min! Total pairs in file: {total_pairs_scored:,} ({new_pairs_scored:,} new scored, Avg: {avg_rate:,.0f} pairs/sec)", flush=True)
     print(f"Output saved to: {output_path}", flush=True)
     return total_pairs_scored
 
