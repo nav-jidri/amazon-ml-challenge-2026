@@ -177,30 +177,60 @@ def score_candidate_pairs(
     model_path: Path,
     records_s1: Dict[str, Dict[str, Any]],
     records_s23: Dict[str, Dict[str, Any]],
-    batch_size: int = 50_000
+    batch_size: int = 200_000
 ) -> int:
     """Stream candidate pairs, generate pairwise features, score probabilities with XGBoost, and write TSV."""
+    import time
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(line_buffering=True)
+
     if not model_path.exists():
         raise FileNotFoundError(f"Model file not found: {model_path}. Run train.py first.")
 
-    print(f"\nLoading trained model from {model_path}...")
+    print(f"\nLoading trained model from {model_path}...", flush=True)
     model = XGBClassifier()
     model.load_model(str(model_path))
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    print(f"Scoring candidate pairs from {candidate_pairs_path} -> {output_path}...")
+    print(f"Scoring candidate pairs from {candidate_pairs_path.name} -> {output_path.name} (Batch size: {batch_size:,})...", flush=True)
 
     total_pairs_scored = 0
     buffer_pairs: List[Tuple[str, str]] = []
+    start_time = time.time()
+    last_log_time = start_time
 
+    # 16MB write buffer for high-throughput disk writing
     with open(candidate_pairs_path, "r", encoding="utf-8") as in_fp, \
-         open(output_path, "w", encoding="utf-8", newline="\n") as out_fp:
+         open(output_path, "w", encoding="utf-8", newline="\n", buffering=16 * 1024 * 1024) as out_fp:
 
         # Header
         out_fp.write("source1_entity_id\tcandidate_entity_id\tmatch_probability\n")
 
         # Skip header of candidate_pairs.tsv
-        header = in_fp.readline()
+        _ = in_fp.readline()
+
+        def _process_batch(pairs: List[Tuple[str, str]]) -> None:
+            nonlocal total_pairs_scored, last_log_time
+            if not pairs:
+                return
+            X_batch = build_feature_matrix(pairs, records_s1, records_s23)
+            probs = model.predict_proba(X_batch)[:, 1]
+
+            # Vectorized high-precision country strict mismatch zeroing (feature index 27)
+            if X_batch.shape[1] > 27:
+                probs[X_batch[:, 27] == 1.0] = 0.0
+
+            # Fast chunk string join and buffered write
+            chunk_str = "".join(f"{s}\t{c}\t{p:.4f}\n" for (s, c), p in zip(pairs, probs))
+            out_fp.write(chunk_str)
+
+            total_pairs_scored += len(pairs)
+            now = time.time()
+            if now - last_log_time >= 5.0 or total_pairs_scored % 1_000_000 == 0:
+                elapsed = now - start_time
+                rate = total_pairs_scored / elapsed if elapsed > 0 else 0
+                print(f"  Scored {total_pairs_scored:11,d} pairs | {rate:6,.0f} pairs/sec | Elapsed: {elapsed/60:4.1f} min", flush=True)
+                last_log_time = now
 
         for line in in_fp:
             parts = line.strip().split("\t")
@@ -220,28 +250,18 @@ def score_candidate_pairs(
                     buffer_pairs.append((s1_id, cand_id))
 
             if len(buffer_pairs) >= batch_size:
-                X_batch = build_feature_matrix(buffer_pairs, records_s1, records_s23)
-                probs = model.predict_proba(X_batch)[:, 1]
-
-                for (s1, cand), prob in zip(buffer_pairs, probs):
-                    prob = apply_business_rules(float(prob), records_s1.get(s1, {}), records_s23.get(cand, {}))
-                    out_fp.write(f"{s1}\t{cand}\t{prob:.6f}\n")
-
-                total_pairs_scored += len(buffer_pairs)
+                _process_batch(buffer_pairs)
                 buffer_pairs.clear()
 
         # Flush remaining buffer
         if buffer_pairs:
-            X_batch = build_feature_matrix(buffer_pairs, records_s1, records_s23)
-            probs = model.predict_proba(X_batch)[:, 1]
-            for (s1, cand), prob in zip(buffer_pairs, probs):
-                prob = apply_business_rules(float(prob), records_s1.get(s1, {}), records_s23.get(cand, {}))
-                out_fp.write(f"{s1}\t{cand}\t{prob:.6f}\n")
-            total_pairs_scored += len(buffer_pairs)
+            _process_batch(buffer_pairs)
             buffer_pairs.clear()
 
-    print(f"Scoring completed. Total pairs scored: {total_pairs_scored:,}")
-    print(f"Output saved to: {output_path}")
+    total_time = time.time() - start_time
+    avg_rate = total_pairs_scored / total_time if total_time > 0 else 0
+    print(f"\nScoring completed in {total_time/60:.2f} min! Total pairs: {total_pairs_scored:,} (Avg: {avg_rate:,.0f} pairs/sec)", flush=True)
+    print(f"Output saved to: {output_path}", flush=True)
     return total_pairs_scored
 
 

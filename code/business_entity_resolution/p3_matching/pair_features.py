@@ -178,8 +178,8 @@ def compute_pair_feature_vector(
     addr_comp_exact = 1.0 if (acomp_a and acomp_a == acomp_b) else 0.0
     addr_postcode_exact = 1.0 if (post_a and post_a == post_b) else 0.0
 
-    nums_a = precomputed_a["nums_a"] if precomputed_a else {t for t in addr_toks_a if re.match(r"^\d+$", t)}
-    nums_b = {t for t in addr_toks_b if re.match(r"^\d+$", t)}
+    nums_a = precomputed_a["nums_a"] if precomputed_a else {t for t in addr_toks_a if t.isdigit()}
+    nums_b = {t for t in addr_toks_b if t.isdigit()}
     addr_num_overlap_count = float(len(nums_a & nums_b))
 
     addr_cont_min, addr_cont_max = _containment(addr_toks_a, addr_toks_b)
@@ -318,7 +318,7 @@ def build_feature_matrix(
                 "len_na": len(name_a),
                 "addr_a": addr_a,
                 "addr_toks_a": addr_toks_a,
-                "nums_a": {t for t in addr_toks_a if re.match(r"^\d+$", t)},
+                "nums_a": {t for t in addr_toks_a if t.isdigit()},
                 "addr_ng3_a": _get_char_ngrams(addr_a, 3),
                 "len_aa": len(addr_a),
                 "street_a": _safe_str(rec_a.get("address_street_key", "")),
